@@ -22,6 +22,9 @@
   <script type="text/babel" data-presets="react">
     const { useState, useEffect } = React;
 
+const SUPABASE_URL = "https://qnjwncioybhjgsbrqbyi.supabase.co";
+const SUPABASE_KEY = "sb_publishable_37NVsxhh-trAPXLCF5p5UA__X4nh4a6";
+const WORKER_URL   = "https://super-queen-fe04ai-proxy.pastuchamateusz.workers.dev/";
 
 const METRICS = [
   { id: "rozmowy",     label: "Nowe rozmowy",           icon: "💬", color: "#3B9EE8", tip: "Ile nowych osob zagadnales/as dzisiaj?" },
@@ -33,7 +36,6 @@ const METRICS = [
 ];
 
 const ADMIN_PIN = "admin2026";
-
 const TEAMS = [
   "Katarzyna Golos","Danuta Chyla","Mariusz Bartosz","Grace Gralka",
   "Magdalena Krawczyk","Radoslaw Fisz","Kinga Wiesyk","Helena Cieciora",
@@ -45,42 +47,60 @@ const monthKey = () => { const d=new Date(); return `${d.getFullYear()}-${String
 const monthLbl = () => new Date().toLocaleDateString("pl-PL",{month:"long",year:"numeric"});
 const pct      = (a,b) => b>0 ? Math.round(a/b*100) : 0;
 
-async function loadData(key) {
-  try { const v=localStorage.getItem(key); return v?JSON.parse(v):null; } catch { return null; }
-}
-async function saveData(key,val) {
-  try { localStorage.setItem(key,JSON.stringify(val)); } catch {}
+// ── SUPABASE ──────────────────────────────────────────────────────────────────
+async function db(path, opts={}) {
+  try {
+    const res = await fetch(SUPABASE_URL+"/rest/v1/"+path, {
+      headers: {
+        "apikey": SUPABASE_KEY,
+        "Authorization": "Bearer "+SUPABASE_KEY,
+        "Content-Type": "application/json",
+        "Prefer": opts.prefer||"return=representation",
+      },
+      method: opts.method||"GET",
+      body: opts.body ? JSON.stringify(opts.body) : undefined,
+    });
+    if(!res.ok){ console.error("DB error", res.status, await res.text()); return null; }
+    const ct = res.headers.get("content-type")||"";
+    return ct.includes("json") ? res.json() : null;
+  } catch(e) { console.error("DB fetch error", e); return null; }
 }
 
+async function loadMembers() {
+  const rows = await db("members?select=*&order=name") || [];
+  return rows.map(r=>({id:r.id,name:r.name,idNum:r.id_num,team:r.team,joined:r.joined,lastSeen:r.last_seen,lastEntry:r.last_entry}));
+}
+async function saveMember(m) {
+  return db("members?on_conflict=id", {method:"POST",prefer:"resolution=merge-duplicates",body:{id:m.id,name:m.name,id_num:m.idNum,team:m.team,joined:m.joined,last_seen:m.lastSeen,last_entry:m.lastEntry}});
+}
+async function loadEntries(memberId) {
+  const rows = await db(`entries?member_id=eq.${memberId}&order=date`) || [];
+  return rows.map(r=>({date:r.date,week:r.week,rozmowy:r.rozmowy||0,zaproszenia:r.zaproszenia||0,spotkania:r.spotkania||0,partnerzy:r.partnerzy||0,followup:r.followup||0,sety:r.sety||0}));
+}
+async function saveEntry(memberId, e) {
+  return db("entries?on_conflict=member_id,date", {method:"POST",prefer:"resolution=merge-duplicates",body:{member_id:memberId,date:e.date,week:e.week,rozmowy:e.rozmowy||0,zaproszenia:e.zaproszenia||0,spotkania:e.spotkania||0,partnerzy:e.partnerzy||0,followup:e.followup||0,sety:e.sety||0}});
+}
+async function loadAllEntries() {
+  const rows = await db("entries?select=*&order=date") || [];
+  const map = {};
+  for(const r of rows){ if(!map[r.member_id])map[r.member_id]=[]; map[r.member_id].push({date:r.date,week:r.week,rozmowy:r.rozmowy||0,zaproszenia:r.zaproszenia||0,spotkania:r.spotkania||0,partnerzy:r.partnerzy||0,followup:r.followup||0,sety:r.sety||0}); }
+  return map;
+}
+
+// ── AI ────────────────────────────────────────────────────────────────────────
 async function getAICoaching({memberName,todayData,history,isAdmin,teamData}) {
   const c1=pct(todayData.zaproszenia,todayData.rozmowy),c2=pct(todayData.spotkania,todayData.zaproszenia),c3=pct(todayData.partnerzy,todayData.spotkania);
   const last7=history.slice(-7);
   const avg=id=>last7.length>0?Math.round(last7.reduce((s,e)=>s+(e[id]||0),0)/last7.length*10)/10:0;
   const prompt=isAdmin
-    ?`Jestes ekspertem menedzmentu sprzedazy i budowania zespolow w biznesie sieciowym (branzy longevity). Analizujesz dane zespolu i dajesz liderowi konkretne wskazowki. Jezyk: polski, bezposredni.
-
-DANE ZESPOLU:
-- Czlonkow: ${teamData.total}, Aktywnych: ${teamData.active}
-- Rozmowy: ${teamData.rozmowy}, Zaproszenia: ${teamData.zaproszenia}, Spotkania: ${teamData.spotkania}
-- Nowi partnerzy: ${teamData.partnerzy}, Follow-upy: ${teamData.followup}, Sety: ${teamData.sety}
-- Konwersje: R→Z ${pct(teamData.zaproszenia,teamData.rozmowy)}%, Z→S ${pct(teamData.spotkania,teamData.zaproszenia)}%, S→P ${pct(teamData.partnerzy,teamData.spotkania)}%
-CZLONKOWIE: ${teamData.members.map(m=>`${m.name}: ${m.active?"AKTYWNY":"BRAK"}, rozmowy:${m.rozmowy||0}`).join("; ")}
-
-Odpowiedz TYLKO JSON bez backtickow: {"ocena":"...","priorytet":"...","wskazowki":["...","...","..."],"czerwona_flaga":"... lub null","motywacja":"..."}`
-    :`Jestes osobistym coachem sprzedazy (branzy longevity). Mow bezposrednio do osoby (per Ty). Jezyk: polski, szczery.
-
-OSOBA: ${memberName}
-DZIS: rozmowy=${todayData.rozmowy}, zaproszenia=${todayData.zaproszenia}, spotkania=${todayData.spotkania}, partnerzy=${todayData.partnerzy}, followup=${todayData.followup}, sety=${todayData.sety}
-KONWERSJE: R→Z=${c1}%, Z→S=${c2}%, S→P=${c3}%
-SREDNIA 7 DNI: rozmowy/d=${avg("rozmowy")}, zaproszenia/d=${avg("zaproszenia")}, spotkania/d=${avg("spotkania")}
-LACZNIE ${history.length} dni: rozmowy=${history.reduce((s,e)=>s+(e.rozmowy||0),0)}, partnerzy=${history.reduce((s,e)=>s+(e.partnerzy||0),0)}
-
-Odpowiedz TYLKO JSON bez backtickow: {"ocena_dnia":"...","mocna_strona":"...","obszar_do_poprawy":"...","zadanie_na_jutro":"...","wskazowka_techniczna":"...","motywacja":"..."}`;
-
-  const res=await fetch("https://super-queen-fe04ai-proxy.pastuchamateusz.workers.dev/",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({model:"claude-sonnet-4-6",max_tokens:1000,messages:[{role:"user",content:prompt}]})});
-  const data=await res.json();console.log("AI response:",JSON.stringify(data).substring(0,600));
-  const text=data.content?.find(b=>b.type==="text")?.text||"{}";
-  try{return JSON.parse(text.replace(/```json|```/g,"").trim());}catch{return null;}
+    ?`Jestes ekspertem menedzmentu sprzedazy i budowania zespolow w biznesie sieciowym (branzy longevity). Analizujesz dane zespolu i dajesz liderowi konkretne wskazowki. Jezyk: polski, bezposredni.\n\nDANE ZESPOLU:\n- Czlonkow: ${teamData.total}, Aktywnych: ${teamData.active}\n- Rozmowy: ${teamData.rozmowy}, Zaproszenia: ${teamData.zaproszenia}, Spotkania: ${teamData.spotkania}\n- Nowi partnerzy: ${teamData.partnerzy}, Follow-upy: ${teamData.followup}, Sety: ${teamData.sety}\nCZLONKOWIE: ${teamData.members.map(m=>`${m.name}: ${m.active?"AKTYWNY":"BRAK"}, rozmowy:${m.rozmowy||0}`).join("; ")}\n\nOdpowiedz TYLKO JSON bez backtickow: {"ocena":"...","priorytet":"...","wskazowki":["...","...","..."],"czerwona_flaga":"... lub null","motywacja":"..."}`
+    :`Jestes osobistym coachem sprzedazy (branzy longevity). Mow bezposrednio do osoby (per Ty). Jezyk: polski, szczery.\n\nOSOBA: ${memberName}\nDZIS: rozmowy=${todayData.rozmowy}, zaproszenia=${todayData.zaproszenia}, spotkania=${todayData.spotkania}, partnerzy=${todayData.partnerzy}, followup=${todayData.followup}, sety=${todayData.sety}\nKONWERSJE: R→Z=${c1}%, Z→S=${c2}%, S→P=${c3}%\nSREDNIA 7 DNI: rozmowy/d=${avg("rozmowy")}, zaproszenia/d=${avg("zaproszenia")}, spotkania/d=${avg("spotkania")}\n\nOdpowiedz TYLKO JSON bez backtickow: {"ocena_dnia":"...","mocna_strona":"...","obszar_do_poprawy":"...","zadanie_na_jutro":"...","wskazowka_techniczna":"...","motywacja":"..."}`;
+  try {
+    const res=await fetch(WORKER_URL,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({model:"claude-sonnet-4-6",max_tokens:1000,messages:[{role:"user",content:prompt}]})});
+    const data=await res.json();
+    const text=data.content?.find(b=>b.type==="text")?.text||"{}";
+    return JSON.parse(text.replace(/```json|```/g,"").trim());
+  } catch(e) { console.error("AI error",e); return null; }
 }
 
 const GS=`@import url('https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;600;700;800&display=swap');
@@ -151,7 +171,7 @@ function AICoachPanel({memberName,todayData,history,isAdmin=false,teamData=null}
             <div style={{background:"#12122a",borderLeft:"3px solid #FFB700",borderRadius:10,padding:"11px 13px",marginBottom:9}}><div style={{fontSize:9,color:"#FFB700",letterSpacing:1,marginBottom:4}}>OCENA ZESPOLU</div><div style={{fontSize:13,color:"#ddd",lineHeight:1.6}}>{coaching.ocena}</div></div>
             <div style={{background:"#0a1a0a",border:"1px solid #27AE6030",borderRadius:10,padding:"11px 13px",marginBottom:9}}><div style={{fontSize:9,color:"#27AE60",letterSpacing:1,marginBottom:6}}>🎯 PRIORYTET LIDERA</div><div style={{fontSize:13,color:"#fff",fontWeight:600}}>{coaching.priorytet}</div></div>
             <div style={{background:"#0a1220",border:"1px solid #3B9EE830",borderRadius:10,padding:"11px 13px",marginBottom:9}}><div style={{fontSize:9,color:"#3B9EE8",letterSpacing:1,marginBottom:8}}>💡 WSKAZOWKI</div>{(coaching.wskazowki||[]).map((w,i)=>(<div key={i} style={{display:"flex",gap:8,marginBottom:7,alignItems:"flex-start"}}><div style={{width:18,height:18,borderRadius:"50%",background:"#3B9EE822",display:"flex",alignItems:"center",justifyContent:"center",fontSize:9,color:"#3B9EE8",flexShrink:0,marginTop:1}}>{i+1}</div><div style={{fontSize:12,color:"#ccc",lineHeight:1.5}}>{w}</div></div>))}</div>
-            {coaching.czerwona_flaga&&<div style={{background:"#1a0808",border:"1px solid #E74C3C44",borderRadius:10,padding:"11px 13px",marginBottom:9}}><div style={{fontSize:9,color:"#E74C3C",letterSpacing:1,marginBottom:4}}>🚨 CZERWONA FLAGA</div><div style={{fontSize:12,color:"#ffaaaa",lineHeight:1.5}}>{coaching.czerwona_flaga}</div></div>}
+            {coaching.czerwona_flaga&&coaching.czerwona_flaga!=="null"&&<div style={{background:"#1a0808",border:"1px solid #E74C3C44",borderRadius:10,padding:"11px 13px",marginBottom:9}}><div style={{fontSize:9,color:"#E74C3C",letterSpacing:1,marginBottom:4}}>🚨 CZERWONA FLAGA</div><div style={{fontSize:12,color:"#ffaaaa",lineHeight:1.5}}>{coaching.czerwona_flaga}</div></div>}
             <div style={{background:"linear-gradient(135deg,#FFB70010,#E67E2210)",border:"1px solid #FFB70020",borderRadius:10,padding:"12px 14px",textAlign:"center"}}><div style={{fontSize:12,color:"#fde68a",fontStyle:"italic",lineHeight:1.6}}>{coaching.motywacja}</div></div>
           </>}
         </div>
@@ -162,22 +182,27 @@ function AICoachPanel({memberName,todayData,history,isAdmin=false,teamData=null}
 }
 
 // ── MEMBER VIEW ───────────────────────────────────────────────────────────────
-function MemberView({memberId,memberName,memberTeam,memberIdNum,onBack}){
+function MemberView({memberId,memberName,memberTeam,memberIdNum,memberJoined,onBack}){
   const [tab,setTab]=useState("daily");
   const [todayData,setTodayData]=useState(()=>Object.fromEntries(METRICS.map(m=>[m.id,0])));
   const [history,setHistory]=useState([]);
   const [saved,setSaved]=useState(false);
   const [loading,setLoading]=useState(true);
 
-  useEffect(()=>{(async()=>{const hist=await loadData(`member-${memberId}-history`)||[];setHistory(hist);const td=hist.find(e=>e.date===today());if(td)setTodayData(td);setLoading(false);})();},[memberId]);
+  useEffect(()=>{(async()=>{
+    const hist=await loadEntries(memberId);
+    setHistory(hist);
+    const td=hist.find(e=>e.date===today());
+    if(td)setTodayData(td);
+    setLoading(false);
+  })();},[memberId]);
 
   const handleSave=async()=>{
     const entry={...todayData,date:today(),week:weekKey()};
     const newHist=[...history.filter(e=>e.date!==today()),entry];
     setHistory(newHist);
-    await saveData(`member-${memberId}-history`,newHist);
-    const all=await loadData("all-members")||[];
-    await saveData("all-members",all.map(m=>m.id===memberId?{...m,lastEntry:entry,lastSeen:today()}:m));
+    await saveEntry(memberId,entry);
+    await saveMember({id:memberId,name:memberName,idNum:memberIdNum,team:memberTeam,joined:memberJoined||today(),lastSeen:today(),lastEntry:entry});
     setSaved(true);setTimeout(()=>setSaved(false),2500);
   };
 
@@ -211,75 +236,42 @@ function MemberView({memberId,memberName,memberTeam,memberIdNum,onBack}){
         {tab==="week"&&<>
           <div style={{fontSize:11,color:"#555",marginBottom:12,textAlign:"center"}}>Biezacy tydzien — {weekEntries.length} aktywnych dni</div>
           <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:8,marginBottom:14}}>{METRICS.map(m=>(<StatCard key={m.id} label={m.label} icon={m.icon} color={m.color} value={weekTotals[m.id]||0}/>))}</div>
-          {weekTotals.rozmowy>0&&<><div style={{fontSize:10,color:"#555",marginBottom:7,letterSpacing:1}}>KONWERSJA TYGODNIA</div><div style={{background:"#12122a",border:"1px solid #222",borderRadius:12,padding:13,marginBottom:14}}><ConvBar label="Rozmowa → Zaproszenie" value={pct(weekTotals.zaproszenia,weekTotals.rozmowy)} color="#3B9EE8"/><ConvBar label="Zaproszenie → Spotkanie" value={pct(weekTotals.spotkania,weekTotals.zaproszenia)} color="#7B4FE8"/><ConvBar label="Spotkanie → Partner/Klient" value={pct(weekTotals.partnerzy,weekTotals.spotkania)} color="#27AE60"/></div></>}
+          {weekTotals.rozmowy>0&&<div style={{background:"#12122a",border:"1px solid #222",borderRadius:12,padding:13,marginBottom:14}}><ConvBar label="Rozmowa → Zaproszenie" value={pct(weekTotals.zaproszenia,weekTotals.rozmowy)} color="#3B9EE8"/><ConvBar label="Zaproszenie → Spotkanie" value={pct(weekTotals.spotkania,weekTotals.zaproszenia)} color="#7B4FE8"/><ConvBar label="Spotkanie → Partner/Klient" value={pct(weekTotals.partnerzy,weekTotals.spotkania)} color="#27AE60"/></div>}
           {weekEntries.sort((a,b)=>a.date.localeCompare(b.date)).map(e=>(<div key={e.date} style={{background:"#12122a",border:"1px solid #222",borderRadius:10,padding:"10px 13px",marginBottom:7,display:"flex",justifyContent:"space-between",alignItems:"center"}}><div style={{fontSize:12,color:"#888"}}>{new Date(e.date+"T12:00:00").toLocaleDateString("pl-PL",{weekday:"short",day:"numeric",month:"short"})}</div><div style={{display:"flex",gap:8}}>{METRICS.map(m=>(<div key={m.id} style={{textAlign:"center"}}><div style={{fontSize:13,fontWeight:700,color:m.color}}>{e[m.id]||0}</div><div style={{fontSize:8,color:"#555"}}>{m.icon}</div></div>))}</div></div>))}
         </>}
         {tab==="history"&&<>
           <div style={{fontSize:11,color:"#555",marginBottom:12,textAlign:"center"}}>Historia — {history.length} dni</div>
           {history.length===0?<div style={{textAlign:"center",color:"#555",padding:40}}>Brak historii jeszcze</div>
-          :[...history].sort((a,b)=>b.date.localeCompare(a.date)).map(e=>(<div key={e.date} style={{background:"#12122a",border:"1px solid #222",borderRadius:12,padding:"13px 13px",marginBottom:9}}><div style={{fontSize:11,color:"#FFB700",fontWeight:700,marginBottom:9}}>{new Date(e.date+"T12:00:00").toLocaleDateString("pl-PL",{weekday:"long",day:"numeric",month:"long"})}</div><div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr",gap:7}}>{METRICS.map(m=>(<div key={m.id} style={{textAlign:"center"}}><div style={{fontSize:17,fontWeight:800,color:m.color}}>{e[m.id]||0}</div><div style={{fontSize:9,color:"#555"}}>{m.label}</div></div>))}</div></div>))}
+          :[...history].sort((a,b)=>b.date.localeCompare(a.date)).map(e=>(<div key={e.date} style={{background:"#12122a",border:"1px solid #222",borderRadius:12,padding:"13px",marginBottom:9}}><div style={{fontSize:11,color:"#FFB700",fontWeight:700,marginBottom:9}}>{new Date(e.date+"T12:00:00").toLocaleDateString("pl-PL",{weekday:"long",day:"numeric",month:"long"})}</div><div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr",gap:7}}>{METRICS.map(m=>(<div key={m.id} style={{textAlign:"center"}}><div style={{fontSize:17,fontWeight:800,color:m.color}}>{e[m.id]||0}</div><div style={{fontSize:9,color:"#555"}}>{m.label}</div></div>))}</div></div>))}
         </>}
       </div>
     </div>
   );
 }
 
-function RankingRow({r, i, period}) {
-  const medal = i===0?"🥇":i===1?"🥈":i===2?"🥉":"";
-  const sc = r.score>=(period==="monthly"?200:50)?"#27AE60":r.score>=(period==="monthly"?80:20)?"#FFB700":"#888";
-  return (
-    <div style={{background:"#12122a",border:"1px solid #1a1a2e",borderRadius:10,padding:"10px 13px",marginBottom:6}}>
-      <div style={{display:"flex",alignItems:"center",gap:10,marginBottom:6}}>
-        <div style={{fontSize:18,minWidth:24,textAlign:"center"}}>{medal||<span style={{fontSize:12,color:"#444"}}>#{i+1}</span>}</div>
-        <div style={{flex:1}}>
-          <div style={{fontWeight:700,fontSize:13}}>{r.name}</div>
-          <div style={{fontSize:10,color:"#555"}}>{r.team||"—"} · ID:{r.idNum} · {r.activeDays}d aktywnych</div>
-        </div>
-        <div style={{textAlign:"right"}}>
-          <div style={{fontSize:15,fontWeight:800,color:sc}}>{r.score}</div>
-          <div style={{fontSize:9,color:"#555"}}>pkt</div>
-        </div>
-      </div>
-      <div style={{display:"grid",gridTemplateColumns:"repeat(6,1fr)",gap:4,marginBottom:r.weekBreakdown?.length>1?7:0}}>
-        {METRICS.map(m=>(<div key={m.id} style={{textAlign:"center"}}><div style={{fontSize:13,fontWeight:700,color:m.color}}>{r[m.id]||0}</div><div style={{fontSize:8,color:"#444"}}>{m.icon}</div></div>))}
-      </div>
-      {r.weekBreakdown?.length>1 && (
-        <div style={{display:"flex",gap:5,flexWrap:"wrap"}}>
-          {r.weekBreakdown.map(wb=>(
-            <div key={wb.wk} style={{background:"#0d0d1a",borderRadius:6,padding:"4px 7px",fontSize:9,textAlign:"center"}}>
-              <div style={{color:"#888"}}>T{wb.wk.split("-W")[1]}</div>
-              <div style={{color:"#3B9EE8",fontWeight:700}}>{wb.rozmowy}💬</div>
-              <div style={{color:"#27AE60"}}>{wb.spotkania}🤝</div>
-            </div>
-          ))}
-        </div>
-      )}
+function RankingRow({r,i,period}){
+  const medal=i===0?"🥇":i===1?"🥈":i===2?"🥉":"";
+  const sc=r.score>=(period==="monthly"?200:50)?"#27AE60":r.score>=(period==="monthly"?80:20)?"#FFB700":"#888";
+  return(<div style={{background:"#12122a",border:"1px solid #1a1a2e",borderRadius:10,padding:"10px 13px",marginBottom:6}}>
+    <div style={{display:"flex",alignItems:"center",gap:10,marginBottom:6}}>
+      <div style={{fontSize:18,minWidth:24,textAlign:"center"}}>{medal||<span style={{fontSize:12,color:"#444"}}>#{i+1}</span>}</div>
+      <div style={{flex:1}}><div style={{fontWeight:700,fontSize:13}}>{r.name}</div><div style={{fontSize:10,color:"#555"}}>{r.team||"—"} · ID:{r.idNum} · {r.activeDays}d aktywnych</div></div>
+      <div style={{textAlign:"right"}}><div style={{fontSize:15,fontWeight:800,color:sc}}>{r.score}</div><div style={{fontSize:9,color:"#555"}}>pkt</div></div>
     </div>
-  );
+    <div style={{display:"grid",gridTemplateColumns:"repeat(6,1fr)",gap:4}}>{METRICS.map(m=>(<div key={m.id} style={{textAlign:"center"}}><div style={{fontSize:13,fontWeight:700,color:m.color}}>{r[m.id]||0}</div><div style={{fontSize:8,color:"#444"}}>{m.icon}</div></div>))}</div>
+  </div>);
 }
 
-function TeamRankRow({t, i, color, barMax}) {
-  const medal = i===0?"🥇":i===1?"🥈":i===2?"🥉":"";
-  return (
-    <div style={{background:"#12122a",border:"1px solid #222",borderRadius:11,padding:"12px 14px",marginBottom:8}}>
-      <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:8}}>
-        <div>
-          <span style={{fontSize:16,marginRight:6}}>{medal||`#${i+1}`}</span>
-          <span style={{fontWeight:700,fontSize:13}}>{t.name}</span>
-          <span style={{marginLeft:8,fontSize:10,color:"#555"}}>{t.members} osob</span>
-        </div>
-        <div style={{textAlign:"right"}}>
-          <div style={{fontSize:16,fontWeight:800,color:color}}>{t.score} pkt</div>
-        </div>
-      </div>
-      <div style={{background:"#0d0d1a",borderRadius:4,height:5,marginBottom:8,overflow:"hidden"}}>
-        <div style={{height:"100%",width:`${Math.round(t.score/Math.max(barMax||1,1)*100)}%`,background:`linear-gradient(90deg,${color},${color}88)`,borderRadius:4}}/>
-      </div>
-      <div style={{display:"grid",gridTemplateColumns:"repeat(6,1fr)",gap:4}}>
-        {METRICS.map(m=>(<div key={m.id} style={{textAlign:"center"}}><div style={{fontSize:13,fontWeight:700,color:m.color}}>{t[m.id]||0}</div><div style={{fontSize:8,color:"#444"}}>{m.icon}</div></div>))}
-      </div>
+function TeamRankRow({t,i,color,barMax}){
+  const medal=i===0?"🥇":i===1?"🥈":i===2?"🥉":"";
+  return(<div style={{background:"#12122a",border:"1px solid #222",borderRadius:11,padding:"12px 14px",marginBottom:8}}>
+    <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:8}}>
+      <div><span style={{fontSize:16,marginRight:6}}>{medal||`#${i+1}`}</span><span style={{fontWeight:700,fontSize:13}}>{t.name}</span><span style={{marginLeft:8,fontSize:10,color:"#555"}}>{t.members} osob</span></div>
+      <div style={{fontSize:16,fontWeight:800,color}}>{t.score} pkt</div>
     </div>
-  );
+    <div style={{background:"#0d0d1a",borderRadius:4,height:5,marginBottom:8,overflow:"hidden"}}><div style={{height:"100%",width:`${Math.round(t.score/Math.max(barMax||1,1)*100)}%`,background:`linear-gradient(90deg,${color},${color}88)`,borderRadius:4}}/></div>
+    <div style={{display:"grid",gridTemplateColumns:"repeat(6,1fr)",gap:4}}>{METRICS.map(m=>(<div key={m.id} style={{textAlign:"center"}}><div style={{fontSize:13,fontWeight:700,color:m.color}}>{t[m.id]||0}</div><div style={{fontSize:8,color:"#444"}}>{m.icon}</div></div>))}</div>
+  </div>);
 }
 
 // ── ADMIN VIEW ────────────────────────────────────────────────────────────────
@@ -294,19 +286,17 @@ function AdminView({onBack}){
   const [histLoading,setHistLoading]=useState(false);
   const [histLoaded,setHistLoaded]=useState(false);
 
-  useEffect(()=>{(async()=>{const m=await loadData("all-members")||[];setMembers(m);setLoading(false);})();},[]);
+  useEffect(()=>{(async()=>{const m=await loadMembers();setMembers(m);setLoading(false);})();},[]);
 
   const loadAllHist=async()=>{
     if(histLoaded)return;
     setHistLoading(true);
-    const all=await loadData("all-members")||[];
-    const h={};
-    for(const m of all)h[m.id]=await loadData(`member-${m.id}-history`)||[];
+    const h=await loadAllEntries();
     setAllHistories(h);setHistLoaded(true);setHistLoading(false);
   };
 
   const handleTab=t=>{setTab(t);if(t==="weekly"||t==="monthly")loadAllHist();};
-  const selectMember=async m=>{setSelected(m);setMemberHistory(await loadData(`member-${m.id}-history`)||[]);setTab("member");};
+  const selectMember=async m=>{setSelected(m);setMemberHistory(await loadEntries(m.id));setTab("member");};
   const openTeam=t=>{setSelectedTeam(t);setTab("teamdetail");};
 
   const activeToday=members.filter(m=>m.lastSeen===today());
@@ -314,21 +304,45 @@ function AdminView({onBack}){
   const teamData={total:members.length,active:activeToday.length,...teamToday,members:members.map(m=>({name:m.name,active:m.lastSeen===today(),rozmowy:m.lastEntry?.rozmowy||0}))};
 
   const computeStats=mList=>{const a=mList.filter(m=>m.lastSeen===today());const t=METRICS.reduce((acc,m)=>{acc[m.id]=a.reduce((s,mem)=>s+(mem.lastEntry?.[m.id]||0),0);return acc;},{});return{active:a.length,total:mList.length,...t};};
-
   const computePeriodStats=(mList,filterFn)=>mList.map(m=>{
     const hist=allHistories[m.id]||[];
     const entries=hist.filter(filterFn);
     const totals=METRICS.reduce((acc,mt)=>{acc[mt.id]=entries.reduce((s,e)=>s+(e[mt.id]||0),0);return acc;},{});
     const activeDays=entries.length;
     const score=(totals.rozmowy||0)+(totals.zaproszenia||0)*2+(totals.spotkania||0)*3+(totals.partnerzy||0)*10+(totals.sety||0)*5;
-    const weekBreakdown=[...new Set(entries.map(e=>e.week))].sort().map(wk=>{const we=entries.filter(e=>e.week===wk);return{wk,rozmowy:we.reduce((s,e)=>s+(e.rozmowy||0),0),spotkania:we.reduce((s,e)=>s+(e.spotkania||0),0)};});
-    return{...m,...totals,activeDays,score,weekBreakdown};
+    return{...m,...totals,activeDays,score};
   }).sort((a,b)=>b.score-a.score);
 
   if(loading)return <Spinner/>;
-
   const backLabel=tab==="member"?"← Profil":tab==="teamdetail"?"← Podzesp.":"← Wyjdz";
   const backAction=tab==="member"?()=>setTab("overview"):tab==="teamdetail"?()=>setTab("teams"):onBack;
+
+  const periodSection=(label,color,period,filterFn)=>{
+    if(histLoading)return <Spinner full={false}/>;
+    if(!histLoaded)return <div style={{textAlign:"center",color:"#555",padding:40}}>Ladowanie...</div>;
+    const rows=computePeriodStats(members,filterFn);
+    const totals=METRICS.reduce((acc,m)=>{acc[m.id]=rows.reduce((s,r)=>s+(r[m.id]||0),0);return acc;},{});
+    const active=rows.filter(r=>r.activeDays>0).length;
+    const teamRows=TEAMS.map(tn=>{const tm=rows.filter(r=>r.team===tn);const t=METRICS.reduce((acc,m)=>{acc[m.id]=tm.reduce((s,r)=>s+(r[m.id]||0),0);return acc;},{});return{name:tn,members:tm.length,score:tm.reduce((s,r)=>s+r.score,0),...t};}).filter(t=>t.members>0).sort((a,b)=>b.score-a.score);
+    const isMonth=period==="monthly";
+    return(<>
+      <div style={{background:isMonth?"linear-gradient(135deg,#1a1422,#1a1a3a)":"linear-gradient(135deg,#16162e,#1a1a3a)",border:`1px solid ${isMonth?"#7B4FE833":"#FFB70033"}`,borderRadius:12,padding:"14px 16px",marginBottom:14,textAlign:"center"}}>
+        <div style={{fontSize:11,color:isMonth?"#a78bfa":"#FFB700",letterSpacing:2,marginBottom:4}}>{isMonth?"RAPORT MIESIĘCZNY":"RAPORT TYGODNIOWY"}</div>
+        <div style={{fontSize:22,fontWeight:800,color:"#fff"}}>{isMonth?monthLbl():`Tydzien ${weekKey().split("-W")[1]} · ${new Date().getFullYear()}`}</div>
+        <div style={{fontSize:11,color:"#555",marginTop:4}}>{active} z {members.length} osob aktywnych</div>
+      </div>
+      <div style={{fontSize:10,color:"#555",marginBottom:8,letterSpacing:1}}>SUMA {label}</div>
+      <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr",gap:8,marginBottom:14}}>{METRICS.map(m=>(<StatCard key={m.id} label={m.label} icon={m.icon} color={m.color} value={totals[m.id]||0} sub={isMonth?"ten miesiac":"ten tydzien"}/>))}</div>
+      {totals.rozmowy>0&&<div style={{background:"#12122a",border:"1px solid #222",borderRadius:12,padding:13,marginBottom:14}}><ConvBar label="Rozmowa → Zaproszenie" value={pct(totals.zaproszenia,totals.rozmowy)} color="#3B9EE8"/><ConvBar label="Zaproszenie → Spotkanie" value={pct(totals.spotkania,totals.zaproszenia)} color="#7B4FE8"/><ConvBar label="Spotkanie → Partner/Klient" value={pct(totals.partnerzy,totals.spotkania)} color="#27AE60"/></div>}
+      <div style={{fontSize:10,color:"#555",marginBottom:0,letterSpacing:1}}>AI ANALIZA</div>
+      <AICoachPanel memberName="Lider" todayData={totals} history={[]} isAdmin={true} teamData={{total:members.length,active,...totals,members:rows.map(r=>({name:r.name,active:r.activeDays>0,rozmowy:r.rozmowy||0}))}}/>
+      <div style={{fontSize:10,color:"#555",margin:"20px 0 9px",letterSpacing:1}}>RANKING PODZESP.</div>
+      {teamRows.map((t,i)=><TeamRankRow key={t.name} t={t} i={i} color={color} barMax={teamRows[0]?.score||1}/>)}
+      <div style={{fontSize:10,color:"#555",margin:"18px 0 9px",letterSpacing:1}}>RANKING OSOB</div>
+      {rows.filter(r=>r.activeDays>0).map((r,i)=><RankingRow key={r.id} r={r} i={i} period={period}/>)}
+      {rows.filter(r=>r.activeDays===0).length>0&&<><div style={{fontSize:10,color:"#E74C3C",margin:"14px 0 8px",letterSpacing:1}}>⚠️ BRAK AKTYWNOSCI ({rows.filter(r=>r.activeDays===0).length} osob)</div>{rows.filter(r=>r.activeDays===0).map(r=>(<div key={r.id} style={{background:"#1a0d0d",border:"1px solid #E74C3C22",borderRadius:9,padding:"9px 13px",marginBottom:5,display:"flex",justifyContent:"space-between"}}><span style={{fontWeight:600,fontSize:13,color:"#888"}}>{r.name}</span><span style={{fontSize:10,color:"#E74C3C"}}>0 dni</span></div>))}</>}
+    </>);
+  };
 
   return(
     <div style={{minHeight:"100vh",background:"#0d0d1a",color:"#fff",fontFamily:"'Outfit',sans-serif"}}>
@@ -340,7 +354,6 @@ function AdminView({onBack}){
           <div style={{fontSize:11,color:"#555"}}>{tab==="member"&&selected?selected.name:tab==="teamdetail"&&selectedTeam?`Zespol: ${selectedTeam}`:`${members.length} czlonkow · ${activeToday.length} aktywnych dzis`}</div>
         </div>
       </div>
-
       {["overview","teams","weekly","monthly"].includes(tab)&&(
         <div style={{display:"flex",background:"#12122a",borderBottom:"1px solid #222"}}>
           {[["overview","🌐 Dziś"],["teams","👥 Podzesp."],["weekly","📅 Tydzień"],["monthly","📆 Miesiąc"]].map(([k,l])=>(
@@ -348,13 +361,11 @@ function AdminView({onBack}){
           ))}
         </div>
       )}
-
-      {/* ── OVERVIEW ── */}
       {tab==="overview"&&(
         <div style={{padding:"16px 14px",maxWidth:600,margin:"0 auto"}}>
           <div style={{fontSize:10,color:"#555",marginBottom:9,letterSpacing:1}}>ZESPOL DZISIAJ</div>
           <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr",gap:8,marginBottom:14}}>{METRICS.map(m=>(<StatCard key={m.id} label={m.label} icon={m.icon} color={m.color} value={teamToday[m.id]||0} sub={`${activeToday.length} raportow`}/>))}</div>
-          {teamToday.rozmowy>0&&<><div style={{fontSize:10,color:"#555",marginBottom:7,letterSpacing:1}}>KONWERSJA</div><div style={{background:"#12122a",border:"1px solid #222",borderRadius:12,padding:13,marginBottom:14}}><ConvBar label="Rozmowa → Zaproszenie" value={pct(teamToday.zaproszenia,teamToday.rozmowy)} color="#3B9EE8"/><ConvBar label="Zaproszenie → Spotkanie" value={pct(teamToday.spotkania,teamToday.zaproszenia)} color="#7B4FE8"/><ConvBar label="Spotkanie → Partner/Klient" value={pct(teamToday.partnerzy,teamToday.spotkania)} color="#27AE60"/></div></>}
+          {teamToday.rozmowy>0&&<div style={{background:"#12122a",border:"1px solid #222",borderRadius:12,padding:13,marginBottom:14}}><ConvBar label="Rozmowa → Zaproszenie" value={pct(teamToday.zaproszenia,teamToday.rozmowy)} color="#3B9EE8"/><ConvBar label="Zaproszenie → Spotkanie" value={pct(teamToday.spotkania,teamToday.zaproszenia)} color="#7B4FE8"/><ConvBar label="Spotkanie → Partner/Klient" value={pct(teamToday.partnerzy,teamToday.spotkania)} color="#27AE60"/></div>}
           <div style={{fontSize:10,color:"#555",marginBottom:0,letterSpacing:1}}>AI ANALIZA</div>
           <AICoachPanel memberName="Lider" todayData={teamToday} history={[]} isAdmin={true} teamData={teamData}/>
           <div style={{fontSize:10,color:"#555",margin:"20px 0 9px",letterSpacing:1}}>CZLONKOWIE wg ZESPOLOW ({members.length})</div>
@@ -371,7 +382,7 @@ function AdminView({onBack}){
               {tm.map(m=>{const e=m.lastEntry||{},act=m.lastSeen===today();return(
                 <div key={m.id} onClick={()=>selectMember(m)} style={{background:"#12122a",border:`1px solid ${act?"#27AE6033":"#1a1a2e"}`,borderLeft:`3px solid ${act?"#27AE60":"#2a2a3a"}`,borderRadius:10,padding:"10px 13px",marginBottom:5,cursor:"pointer",marginLeft:12}} onMouseEnter={e2=>e2.currentTarget.style.borderColor="#FFB70055"} onMouseLeave={e2=>e2.currentTarget.style.borderColor=act?"#27AE6033":"#1a1a2e"}>
                   <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:6}}>
-                    <div><span style={{fontWeight:700,fontSize:13}}>{m.name}</span><span style={{marginLeft:6,fontSize:10,color:"#555"}}>ID:{m.idNum}</span><span style={{marginLeft:6,fontSize:10,padding:"1px 6px",borderRadius:20,background:act?"#27AE6018":"#33333318",color:act?"#27AE60":"#555"}}>{act?"✅ dzis":m.lastSeen?`${m.lastSeen}`:"brak"}</span></div>
+                    <div><span style={{fontWeight:700,fontSize:13}}>{m.name}</span><span style={{marginLeft:6,fontSize:10,color:"#555"}}>ID:{m.idNum}</span><span style={{marginLeft:6,fontSize:10,padding:"1px 6px",borderRadius:20,background:act?"#27AE6018":"#33333318",color:act?"#27AE60":"#555"}}>{act?"✅ dzis":m.lastSeen||"brak"}</span></div>
                     <span style={{color:"#444"}}>›</span>
                   </div>
                   <div style={{display:"flex",gap:8}}>{METRICS.map(mt=>(<div key={mt.id} style={{textAlign:"center"}}><div style={{fontSize:13,fontWeight:700,color:act?mt.color:"#333"}}>{act?(e[mt.id]||0):"—"}</div><div style={{fontSize:9,color:"#444"}}>{mt.icon}</div></div>))}</div>
@@ -381,117 +392,40 @@ function AdminView({onBack}){
           })}
         </div>
       )}
-
-      {/* ── TEAMS ── */}
       {tab==="teams"&&(
         <div style={{padding:"16px 14px",maxWidth:600,margin:"0 auto"}}>
           <div style={{fontSize:10,color:"#555",marginBottom:12,letterSpacing:1}}>PODZESPY — KLIKNIJ ABY ZOBACZYC ANALIZE AI</div>
           {TEAMS.map(tn=>{
             const tm=members.filter(m=>m.team===tn);
             if(!tm.length)return(<div key={tn} style={{background:"#0d0d1a",border:"1px solid #1a1a2e",borderRadius:12,padding:"12px 14px",marginBottom:8,opacity:0.4}}><div style={{fontSize:13,color:"#555"}}>👥 {tn}</div><div style={{fontSize:10,color:"#444",marginTop:2}}>Brak czlonkow jeszcze</div></div>);
-            const stats=computeStats(tm);
-            const ap=pct(stats.active,stats.total);
-            const pc=ap>=70?"#27AE60":ap>=40?"#FFB700":"#E74C3C";
-            return(<div key={tn} onClick={()=>openTeam(tn)} style={{background:"#12122a",border:"1px solid #222",borderTop:`3px solid ${pc}`,borderRadius:12,padding:"14px 14px",marginBottom:10,cursor:"pointer",transition:"transform 0.1s"}} onMouseEnter={e=>{e.currentTarget.style.transform="translateY(-2px)";}} onMouseLeave={e=>{e.currentTarget.style.transform="translateY(0)";}}>
+            const stats=computeStats(tm);const ap=pct(stats.active,stats.total);const pc=ap>=70?"#27AE60":ap>=40?"#FFB700":"#E74C3C";
+            return(<div key={tn} onClick={()=>openTeam(tn)} style={{background:"#12122a",border:"1px solid #222",borderTop:`3px solid ${pc}`,borderRadius:12,padding:"14px",marginBottom:10,cursor:"pointer"}} onMouseEnter={e=>{e.currentTarget.style.transform="translateY(-2px)";}} onMouseLeave={e=>{e.currentTarget.style.transform="translateY(0)";}}>
               <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:10}}>
                 <div><div style={{fontWeight:800,fontSize:15}}>👥 {tn}</div><div style={{fontSize:10,color:"#555",marginTop:2}}>{stats.total} osob · <span style={{color:pc}}>{stats.active} aktywnych ({ap}%)</span></div></div>
                 <div style={{fontSize:11,color:"#FFB700",fontWeight:700}}>Analiza AI →</div>
               </div>
-              <div style={{display:"grid",gridTemplateColumns:"repeat(6,1fr)",gap:6,marginBottom:8}}>
-                {METRICS.map(m=>(<div key={m.id} style={{textAlign:"center",background:"#0d0d1a",borderRadius:8,padding:"7px 4px"}}><div style={{fontSize:15,fontWeight:800,color:stats.active>0?m.color:"#333"}}>{stats.active>0?(stats[m.id]||0):"—"}</div><div style={{fontSize:8,color:"#444",marginTop:2}}>{m.icon}</div></div>))}
-              </div>
-              {stats.rozmowy>0&&<div style={{background:"#0d0d1a",borderRadius:8,padding:"8px 10px"}}><div style={{display:"flex",gap:10}}>{[{l:"R→Z",v:pct(stats.zaproszenia,stats.rozmowy),c:"#3B9EE8"},{l:"Z→S",v:pct(stats.spotkania,stats.zaproszenia),c:"#7B4FE8"},{l:"S→P",v:pct(stats.partnerzy,stats.spotkania),c:"#27AE60"}].map(({l,v,c})=>(<div key={l} style={{flex:1}}><div style={{display:"flex",justifyContent:"space-between",marginBottom:3}}><span style={{fontSize:9,color:"#555"}}>{l}</span><span style={{fontSize:9,fontWeight:700,color:v>=30?c:"#E74C3C"}}>{v}%</span></div><div style={{background:"#1a1a2e",borderRadius:3,height:4}}><div style={{height:"100%",width:`${Math.min(v,100)}%`,background:v>=30?c:"#E74C3C",borderRadius:3}}/></div></div>))}</div></div>}
+              <div style={{display:"grid",gridTemplateColumns:"repeat(6,1fr)",gap:6}}>{METRICS.map(m=>(<div key={m.id} style={{textAlign:"center",background:"#0d0d1a",borderRadius:8,padding:"7px 4px"}}><div style={{fontSize:15,fontWeight:800,color:stats.active>0?m.color:"#333"}}>{stats.active>0?(stats[m.id]||0):"—"}</div><div style={{fontSize:8,color:"#444",marginTop:2}}>{m.icon}</div></div>))}</div>
             </div>);
           })}
         </div>
       )}
-
-      {/* ── WEEKLY ── */}
-      {tab==="weekly"&&(
-        <div style={{padding:"16px 14px",maxWidth:640,margin:"0 auto"}}>
-          {histLoading?<Spinner full={false}/>:!histLoaded?<div style={{textAlign:"center",color:"#555",padding:40}}>Ladowanie...</div>:(()=>{
-            const wk=weekKey();
-            const rows=computePeriodStats(members,e=>e.week===wk);
-            const totals=METRICS.reduce((acc,m)=>{acc[m.id]=rows.reduce((s,r)=>s+(r[m.id]||0),0);return acc;},{});
-            const active=rows.filter(r=>r.activeDays>0).length;
-            const teamRows=TEAMS.map(tn=>{const tm=rows.filter(r=>r.team===tn);const t=METRICS.reduce((acc,m)=>{acc[m.id]=tm.reduce((s,r)=>s+(r[m.id]||0),0);return acc;},{});return{name:tn,members:tm.length,score:tm.reduce((s,r)=>s+r.score,0),...t};}).filter(t=>t.members>0).sort((a,b)=>b.score-a.score);
-            return(<>
-              <div style={{background:"linear-gradient(135deg,#16162e,#1a1a3a)",border:"1px solid #FFB70033",borderRadius:12,padding:"14px 16px",marginBottom:14,textAlign:"center"}}>
-                <div style={{fontSize:11,color:"#FFB700",letterSpacing:2,marginBottom:4}}>RAPORT TYGODNIOWY</div>
-                <div style={{fontSize:22,fontWeight:800,color:"#fff"}}>Tydzien {wk.split("-W")[1]} · {new Date().getFullYear()}</div>
-                <div style={{fontSize:11,color:"#555",marginTop:4}}>{active} z {members.length} osob aktywnych</div>
-              </div>
-              <div style={{fontSize:10,color:"#555",marginBottom:8,letterSpacing:1}}>SUMA TYGODNIA</div>
-              <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr",gap:8,marginBottom:14}}>{METRICS.map(m=>(<StatCard key={m.id} label={m.label} icon={m.icon} color={m.color} value={totals[m.id]||0} sub="ten tydzien"/>))}</div>
-              {totals.rozmowy>0&&<><div style={{fontSize:10,color:"#555",marginBottom:7,letterSpacing:1}}>KONWERSJA</div><div style={{background:"#12122a",border:"1px solid #222",borderRadius:12,padding:13,marginBottom:14}}><ConvBar label="Rozmowa → Zaproszenie" value={pct(totals.zaproszenia,totals.rozmowy)} color="#3B9EE8"/><ConvBar label="Zaproszenie → Spotkanie" value={pct(totals.spotkania,totals.zaproszenia)} color="#7B4FE8"/><ConvBar label="Spotkanie → Partner/Klient" value={pct(totals.partnerzy,totals.spotkania)} color="#27AE60"/></div></>}
-              <div style={{fontSize:10,color:"#555",marginBottom:0,letterSpacing:1}}>AI ANALIZA TYGODNIA</div>
-              <AICoachPanel memberName="Lider" todayData={totals} history={[]} isAdmin={true} teamData={{total:members.length,active,...totals,members:rows.map(r=>({name:r.name,active:r.activeDays>0,rozmowy:r.rozmowy||0}))}}/>
-              <div style={{fontSize:10,color:"#555",margin:"20px 0 9px",letterSpacing:1}}>RANKING PODZESP.</div>
-              {teamRows.map((t,i)=><TeamRankRow key={t.name} t={t} i={i} color="#FFB700" barMax={teamRows[0]?.score||1}/>)}
-              <div style={{fontSize:10,color:"#555",margin:"18px 0 9px",letterSpacing:1}}>RANKING OSOB</div>
-              {rows.filter(r=>r.activeDays>0).map((r,i)=><RankingRow key={r.id} r={r} i={i} period="weekly"/>)}
-              {rows.filter(r=>r.activeDays===0).length>0&&<><div style={{fontSize:10,color:"#E74C3C",margin:"14px 0 8px",letterSpacing:1}}>⚠️ BRAK AKTYWNOSCI ({rows.filter(r=>r.activeDays===0).length} osob)</div>{rows.filter(r=>r.activeDays===0).map(r=>(<div key={r.id} style={{background:"#1a0d0d",border:"1px solid #E74C3C22",borderRadius:9,padding:"9px 13px",marginBottom:5,display:"flex",justifyContent:"space-between"}}><span style={{fontWeight:600,fontSize:13,color:"#888"}}>{r.name} <span style={{color:"#555",fontWeight:400}}>{r.team||""}</span></span><span style={{fontSize:10,color:"#E74C3C"}}>0 dni</span></div>))}</>}
-            </>);
-          })()}
-        </div>
-      )}
-
-      {/* ── MONTHLY ── */}
-      {tab==="monthly"&&(
-        <div style={{padding:"16px 14px",maxWidth:640,margin:"0 auto"}}>
-          {histLoading?<Spinner full={false}/>:!histLoaded?<div style={{textAlign:"center",color:"#555",padding:40}}>Ladowanie...</div>:(()=>{
-            const mk=monthKey();
-            const rows=computePeriodStats(members,e=>e.date&&e.date.slice(0,7)===mk);
-            const totals=METRICS.reduce((acc,m)=>{acc[m.id]=rows.reduce((s,r)=>s+(r[m.id]||0),0);return acc;},{});
-            const active=rows.filter(r=>r.activeDays>0).length;
-            const teamRows=TEAMS.map(tn=>{const tm=rows.filter(r=>r.team===tn);const t=METRICS.reduce((acc,m)=>{acc[m.id]=tm.reduce((s,r)=>s+(r[m.id]||0),0);return acc;},{});return{name:tn,members:tm.length,score:tm.reduce((s,r)=>s+r.score,0),...t};}).filter(t=>t.members>0).sort((a,b)=>b.score-a.score);
-            const allEnt=Object.values(allHistories).flat().filter(e=>e.date&&e.date.slice(0,7)===mk);
-            const allWks=[...new Set(allEnt.map(e=>e.week))].sort();
-            const trend=allWks.map(wk=>{const en=allEnt.filter(e=>e.week===wk);return{wk:`T${wk.split("-W")[1]}`,rozmowy:en.reduce((s,e)=>s+(e.rozmowy||0),0),spotkania:en.reduce((s,e)=>s+(e.spotkania||0),0),partnerzy:en.reduce((s,e)=>s+(e.partnerzy||0),0)};});
-            const maxBar=Math.max(...trend.map(w=>w.rozmowy),1);
-            return(<>
-              <div style={{background:"linear-gradient(135deg,#1a1422,#1a1a3a)",border:"1px solid #7B4FE833",borderRadius:12,padding:"14px 16px",marginBottom:14,textAlign:"center"}}>
-                <div style={{fontSize:11,color:"#a78bfa",letterSpacing:2,marginBottom:4}}>RAPORT MIESIĘCZNY</div>
-                <div style={{fontSize:22,fontWeight:800,color:"#fff",textTransform:"capitalize"}}>{monthLbl()}</div>
-                <div style={{fontSize:11,color:"#555",marginTop:4}}>{active} z {members.length} osob aktywnych</div>
-              </div>
-              <div style={{fontSize:10,color:"#555",marginBottom:8,letterSpacing:1}}>SUMA MIESIACA</div>
-              <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr",gap:8,marginBottom:14}}>{METRICS.map(m=>(<StatCard key={m.id} label={m.label} icon={m.icon} color={m.color} value={totals[m.id]||0} sub="ten miesiac"/>))}</div>
-              {totals.rozmowy>0&&<><div style={{fontSize:10,color:"#555",marginBottom:7,letterSpacing:1}}>KONWERSJA</div><div style={{background:"#12122a",border:"1px solid #222",borderRadius:12,padding:13,marginBottom:14}}><ConvBar label="Rozmowa → Zaproszenie" value={pct(totals.zaproszenia,totals.rozmowy)} color="#3B9EE8"/><ConvBar label="Zaproszenie → Spotkanie" value={pct(totals.spotkania,totals.zaproszenia)} color="#7B4FE8"/><ConvBar label="Spotkanie → Partner/Klient" value={pct(totals.partnerzy,totals.spotkania)} color="#27AE60"/></div></>}
-              {trend.length>0&&<><div style={{fontSize:10,color:"#555",marginBottom:8,letterSpacing:1}}>TREND TYGODNIOWY — ROZMOWY</div><div style={{background:"#12122a",border:"1px solid #222",borderRadius:12,padding:"14px 14px",marginBottom:14}}><div style={{display:"flex",alignItems:"flex-end",gap:6,height:80}}>{trend.map((w,i)=>(<div key={i} style={{flex:1,display:"flex",flexDirection:"column",alignItems:"center",gap:4}}><div style={{fontSize:10,color:"#3B9EE8",fontWeight:700}}>{w.rozmowy}</div><div style={{width:"100%",background:"linear-gradient(180deg,#3B9EE8,#7B4FE8)",borderRadius:"4px 4px 0 0",height:`${Math.max(4,Math.round(w.rozmowy/maxBar*56))}px`}}/><div style={{fontSize:9,color:"#555"}}>{w.wk}</div></div>))}</div><div style={{marginTop:10,display:"flex",gap:12,justifyContent:"center",flexWrap:"wrap"}}>{trend.map((w,i)=>(<div key={i} style={{fontSize:10,color:"#555"}}>{w.wk}: <span style={{color:"#27AE60"}}>{w.spotkania}🤝</span> <span style={{color:"#FFB700"}}>{w.partnerzy}⭐</span></div>))}</div></div></>}
-              <div style={{fontSize:10,color:"#555",marginBottom:0,letterSpacing:1}}>AI ANALIZA MIESIACA</div>
-              <AICoachPanel memberName="Lider" todayData={totals} history={[]} isAdmin={true} teamData={{total:members.length,active,...totals,members:rows.map(r=>({name:r.name,active:r.activeDays>0,rozmowy:r.rozmowy||0}))}}/>
-              <div style={{fontSize:10,color:"#555",margin:"20px 0 9px",letterSpacing:1}}>RANKING PODZESP.</div>
-              {teamRows.map((t,i)=><TeamRankRow key={t.name} t={t} i={i} color="#a78bfa" barMax={teamRows[0]?.score||1}/>)}
-              <div style={{fontSize:10,color:"#555",margin:"18px 0 9px",letterSpacing:1}}>RANKING OSOB</div>
-              {rows.filter(r=>r.activeDays>0).map((r,i)=><RankingRow key={r.id} r={r} i={i} period="monthly"/>)}
-              {rows.filter(r=>r.activeDays===0).length>0&&<><div style={{fontSize:10,color:"#E74C3C",margin:"14px 0 8px",letterSpacing:1}}>⚠️ BRAK AKTYWNOSCI ({rows.filter(r=>r.activeDays===0).length} osob)</div>{rows.filter(r=>r.activeDays===0).map(r=>(<div key={r.id} style={{background:"#1a0d0d",border:"1px solid #E74C3C22",borderRadius:9,padding:"9px 13px",marginBottom:5,display:"flex",justifyContent:"space-between"}}><span style={{fontWeight:600,fontSize:13,color:"#888"}}>{r.name} <span style={{color:"#555",fontWeight:400}}>{r.team||""}</span></span><span style={{fontSize:10,color:"#E74C3C"}}>0 dni</span></div>))}</>}
-            </>);
-          })()}
-        </div>
-      )}
-
-      {/* ── TEAM DETAIL ── */}
+      {tab==="weekly"&&<div style={{padding:"16px 14px",maxWidth:640,margin:"0 auto"}}>{periodSection("TYGODNIA","#FFB700","weekly",e=>e.week===weekKey())}</div>}
+      {tab==="monthly"&&<div style={{padding:"16px 14px",maxWidth:640,margin:"0 auto"}}>{periodSection("MIESIACA","#a78bfa","monthly",e=>e.date&&e.date.slice(0,7)===monthKey())}</div>}
       {tab==="teamdetail"&&selectedTeam&&(()=>{
         const tm=members.filter(m=>m.team===selectedTeam);
-        const stats=computeStats(tm);
-        const ap=pct(stats.active,stats.total);
+        const stats=computeStats(tm);const ap=pct(stats.active,stats.total);
         return(<div style={{padding:"16px 14px",maxWidth:560,margin:"0 auto"}}>
           <div style={{background:"linear-gradient(135deg,#16162e,#1a1a3a)",border:"1px solid #2a2a4a",borderRadius:12,padding:"14px 16px",marginBottom:14}}>
             <div style={{fontSize:16,fontWeight:800,color:"#FFB700",marginBottom:8}}>👥 {selectedTeam}</div>
             <div style={{display:"flex",justifyContent:"space-around"}}>{[{v:stats.total,l:"CZLONKOW",c:"#fff"},{v:stats.active,l:"AKTYWNYCH DZIS",c:"#27AE60"},{v:stats.total-stats.active,l:"BRAK RAPORTU",c:"#E74C3C"},{v:ap+"%",l:"AKTYWNOSC",c:"#3B9EE8"}].map(({v,l,c})=>(<div key={l} style={{textAlign:"center"}}><div style={{fontSize:22,fontWeight:800,color:c}}>{v}</div><div style={{fontSize:9,color:"#555",marginTop:2}}>{l}</div></div>))}</div>
           </div>
-          <div style={{fontSize:10,color:"#555",marginBottom:8,letterSpacing:1}}>LICZBY DZISIAJ</div>
           <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr",gap:8,marginBottom:14}}>{METRICS.map(m=>(<StatCard key={m.id} label={m.label} icon={m.icon} color={m.color} value={stats[m.id]||0} sub={`${stats.active} raportow`}/>))}</div>
-          {stats.rozmowy>0&&<><div style={{fontSize:10,color:"#555",marginBottom:7,letterSpacing:1}}>KONWERSJA</div><div style={{background:"#12122a",border:"1px solid #222",borderRadius:12,padding:13,marginBottom:14}}><ConvBar label="Rozmowa → Zaproszenie" value={pct(stats.zaproszenia,stats.rozmowy)} color="#3B9EE8"/><ConvBar label="Zaproszenie → Spotkanie" value={pct(stats.spotkania,stats.zaproszenia)} color="#7B4FE8"/><ConvBar label="Spotkanie → Partner/Klient" value={pct(stats.partnerzy,stats.spotkania)} color="#27AE60"/></div></>}
           <div style={{fontSize:10,color:"#555",marginBottom:0,letterSpacing:1}}>AI ANALIZA ZESPOLU</div>
           <AICoachPanel memberName={selectedTeam} todayData={METRICS.reduce((acc,m)=>{acc[m.id]=stats[m.id]||0;return acc;},{})} history={[]} isAdmin={true} teamData={{total:stats.total,active:stats.active,...METRICS.reduce((acc,m)=>{acc[m.id]=stats[m.id]||0;return acc;},{}),members:tm.map(m=>({name:m.name,active:m.lastSeen===today(),rozmowy:m.lastEntry?.rozmowy||0}))}}/>
           <div style={{fontSize:10,color:"#555",margin:"18px 0 9px",letterSpacing:1}}>CZLONKOWIE ({tm.length})</div>
           {tm.map(m=>{const e=m.lastEntry||{},act=m.lastSeen===today();return(<div key={m.id} onClick={()=>selectMember(m)} style={{background:"#12122a",border:`1px solid ${act?"#27AE6033":"#1a1a2e"}`,borderLeft:`3px solid ${act?"#27AE60":"#2a2a3a"}`,borderRadius:10,padding:"10px 13px",marginBottom:6,cursor:"pointer"}} onMouseEnter={e2=>e2.currentTarget.style.borderColor="#FFB70055"} onMouseLeave={e2=>e2.currentTarget.style.borderColor=act?"#27AE6033":"#1a1a2e"}><div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:6}}><div><span style={{fontWeight:700,fontSize:13}}>{m.name}</span><span style={{marginLeft:6,fontSize:10,color:"#555"}}>ID:{m.idNum}</span><span style={{marginLeft:6,fontSize:10,padding:"1px 6px",borderRadius:20,background:act?"#27AE6018":"#33333318",color:act?"#27AE60":"#555"}}>{act?"✅ dzis":m.lastSeen||"brak"}</span></div><span style={{color:"#444"}}>›</span></div><div style={{display:"flex",gap:8}}>{METRICS.map(mt=>(<div key={mt.id} style={{textAlign:"center"}}><div style={{fontSize:13,fontWeight:700,color:act?mt.color:"#333"}}>{act?(e[mt.id]||0):"—"}</div><div style={{fontSize:9,color:"#444"}}>{mt.icon}</div></div>))}</div></div>);})}
         </div>);
       })()}
-
-      {/* ── MEMBER DETAIL ── */}
       {tab==="member"&&selected&&(
         <div style={{padding:"16px 14px",maxWidth:540,margin:"0 auto"}}>
           <div style={{background:"#16162e",border:"1px solid #2a2a4a",borderRadius:10,padding:"10px 14px",marginBottom:14,display:"flex",gap:16,alignItems:"center"}}>
@@ -502,7 +436,7 @@ function AdminView({onBack}){
             <div style={{textAlign:"center"}}><div style={{fontSize:9,color:"#555",marginBottom:2}}>DNI AKTYWNYCH</div><div style={{fontSize:12,fontWeight:700,color:"#27AE60"}}>{memberHistory.length}</div></div>
           </div>
           <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr",gap:8,marginBottom:14}}>{METRICS.map(m=>{const total=memberHistory.reduce((s,e)=>s+(e[m.id]||0),0);return <StatCard key={m.id} label={m.label} icon={m.icon} color={m.color} value={total} sub="lacznie"/>;})}</div>
-          {memberHistory.length>0&&(()=>{const last=memberHistory[memberHistory.length-1];return<><div style={{fontSize:10,color:"#555",marginBottom:0,letterSpacing:1}}>AI COACHING</div><AICoachPanel memberName={selected.name} todayData={last} history={memberHistory}/></>;})()}
+          {memberHistory.length>0&&<><div style={{fontSize:10,color:"#555",marginBottom:0,letterSpacing:1}}>AI COACHING</div><AICoachPanel memberName={selected.name} todayData={memberHistory[memberHistory.length-1]} history={memberHistory}/></>}
           <div style={{fontSize:10,color:"#555",margin:"18px 0 9px",letterSpacing:1}}>HISTORIA ({memberHistory.length} dni)</div>
           {memberHistory.length===0?<div style={{color:"#555",textAlign:"center",padding:28}}>Brak historii</div>
           :[...memberHistory].sort((a,b)=>b.date.localeCompare(a.date)).slice(0,14).map(e=>{
@@ -526,19 +460,22 @@ function LoginScreen({onMember,onAdmin}){
   const [members,setMembers]=useState([]);
   const [error,setError]=useState("");
   const [newUser,setNewUser]=useState(false);
+  const [loginLoading,setLoginLoading]=useState(false);
 
-  useEffect(()=>{loadData("all-members").then(m=>setMembers(m||[]));},[]);
+  useEffect(()=>{loadMembers().then(m=>setMembers(m||[]));},[]);
 
   const inp={width:"100%",padding:"13px",background:"#12122a",border:"1px solid #333",borderRadius:10,color:"#fff",fontSize:14,marginBottom:9,outline:"none",fontFamily:"inherit"};
-  const sel={...inp,appearance:"none",WebkitAppearance:"none",backgroundImage:`url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='8' viewBox='0 0 12 8'%3E%3Cpath fill='%23666' d='M1 1l5 5 5-5'/%3E%3C/svg%3E")`,backgroundRepeat:"no-repeat",backgroundPosition:"right 14px center",cursor:"pointer"};
+  const sel={...inp,appearance:"none",WebkitAppearance:"none",cursor:"pointer"};
 
   const login=async()=>{
     if(!name.trim()){setError("Wpisz imie i nazwisko");return;}
     if(!idNum.trim()){setError("Wpisz numer ID");return;}
     if(!team){setError("Wybierz swoj zespol");return;}
+    setLoginLoading(true);
     const ex=members.find(m=>m.idNum===idNum.trim());
     const member=ex?{...ex,name:name.trim(),team}:{id:Date.now().toString(),name:name.trim(),idNum:idNum.trim(),team,joined:today()};
-    await saveData("all-members",ex?members.map(m=>m.idNum===idNum.trim()?member:m):[...members,member]);
+    await saveMember({...member,lastSeen:member.lastSeen||null,lastEntry:member.lastEntry||null});
+    setLoginLoading(false);
     onMember(member);
   };
 
@@ -552,12 +489,10 @@ function LoginScreen({onMember,onAdmin}){
         <div style={{fontSize:25,fontWeight:800,color:"#fff",letterSpacing:-0.5}}>Team Tracker</div>
         <div style={{fontSize:11,color:"#555",marginTop:4}}>System monitoringu · Riway</div>
       </div>
-
       {!mode&&<div style={{width:"100%",maxWidth:310}}>
         <button onClick={()=>setMode("member")} style={{width:"100%",padding:"16px 20px",marginBottom:10,background:"linear-gradient(135deg,#3B9EE8,#7B4FE8)",border:"none",borderRadius:14,color:"#fff",fontSize:14,fontWeight:700,cursor:"pointer",fontFamily:"inherit"}}>👤 Czlonek zespolu</button>
         <button onClick={()=>setMode("admin")} style={{width:"100%",padding:"16px 20px",background:"transparent",border:"1px solid #FFB70055",borderRadius:14,color:"#FFB700",fontSize:14,fontWeight:700,cursor:"pointer",fontFamily:"inherit"}}>🎯 Lider (admin)</button>
       </div>}
-
       {mode==="member"&&<div style={{width:"100%",maxWidth:360}}>
         {members.length>0&&!newUser&&<>
           <div style={{fontSize:10,color:"#555",marginBottom:8,letterSpacing:1}}>POWRACAJACY — WYBIERZ SIEBIE</div>
@@ -585,11 +520,10 @@ function LoginScreen({onMember,onAdmin}){
             {TEAMS.map(t=><option key={t} value={t}>{t}</option>)}
           </select>
           {error&&<div style={{color:"#E74C3C",fontSize:12,marginBottom:8}}>{error}</div>}
-          <button onClick={login} style={{width:"100%",padding:"14px",background:"linear-gradient(135deg,#3B9EE8,#7B4FE8)",border:"none",borderRadius:10,color:"#fff",fontSize:14,fontWeight:700,cursor:"pointer",fontFamily:"inherit",marginBottom:6}}>Wejdz →</button>
+          <button onClick={login} disabled={loginLoading} style={{width:"100%",padding:"14px",background:loginLoading?"#333":"linear-gradient(135deg,#3B9EE8,#7B4FE8)",border:"none",borderRadius:10,color:"#fff",fontSize:14,fontWeight:700,cursor:loginLoading?"not-allowed":"pointer",fontFamily:"inherit",marginBottom:6}}>{loginLoading?"Laczenie...":"Wejdz →"}</button>
         </>}
         <button onClick={()=>{setMode(null);setError("");setNewUser(false);setName("");setIdNum("");setTeam("");}} style={{background:"none",border:"none",color:"#444",fontSize:12,cursor:"pointer",width:"100%",padding:"8px",fontFamily:"inherit"}}>← Wróc</button>
       </div>}
-
       {mode==="admin"&&<div style={{width:"100%",maxWidth:310}}>
         <div style={{fontSize:12,color:"#888",marginBottom:12,textAlign:"center"}}>PIN lidera</div>
         <input type="password" value={pin} onChange={e=>{setPin(e.target.value);setError("");}} placeholder="••••••••" onKeyDown={e=>e.key==="Enter"&&(pin===ADMIN_PIN?onAdmin():(setError("Bledny PIN"),setPin("")))} style={{...inp,color:"#FFB700",fontSize:20,textAlign:"center",letterSpacing:4}}/>
@@ -606,14 +540,13 @@ function App(){
   const [view,setView]=useState("login");
   const [member,setMember]=useState(null);
   if(view==="login")  return <LoginScreen onMember={m=>{setMember(m);setView("member");}} onAdmin={()=>setView("admin")}/>;
-  if(view==="member") return <MemberView memberId={member.id} memberName={member.name} memberTeam={member.team} memberIdNum={member.idNum} onBack={()=>setView("login")}/>;
+  if(view==="member") return <MemberView memberId={member.id} memberName={member.name} memberTeam={member.team} memberIdNum={member.idNum} memberJoined={member.joined} onBack={()=>setView("login")}/>;
   if(view==="admin")  return <AdminView onBack={()=>setView("login")}/>;
   return <LoginScreen onMember={m=>{setMember(m);setView("member");}} onAdmin={()=>setView("admin")}/>;
 }
 
-
-    const root = ReactDOM.createRoot(document.getElementById('root'));
-    root.render(React.createElement(App));
+const root = ReactDOM.createRoot(document.getElementById('root'));
+root.render(React.createElement(App));
   </script>
 </body>
 </html>
