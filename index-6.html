@@ -1,0 +1,404 @@
+<!DOCTYPE html>
+<html lang="pl">
+<head>
+  <meta charset="UTF-8"/>
+  <meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1"/>
+  <title>Team Tracker · Riway</title>
+  <meta name="theme-color" content="#0d0d1a"/>
+  <meta name="mobile-web-app-capable" content="yes"/>
+  <meta name="apple-mobile-web-app-capable" content="yes"/>
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent"/>
+  <script>
+// Load React then app
+function loadScript(src, cb) {
+  var s = document.createElement('script');
+  s.src = src;
+  s.onload = cb;
+  s.onerror = function() { document.getElementById('root').innerHTML='<div style="padding:20px;color:red;font-family:sans-serif">Blad ladowania React. Sprawdz polaczenie z internetem.</div>'; };
+  document.head.appendChild(s);
+}
+loadScript('https://cdnjs.cloudflare.com/ajax/libs/react/18.2.0/umd/react.production.min.js', function() {
+  loadScript('https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.production.min.js', function() {
+    runApp();
+  });
+});
+</script>
+  <style>
+    *{box-sizing:border-box;margin:0;padding:0}
+    body{background:#0d0d1a;font-family:sans-serif}
+    #root{min-height:100vh}
+  </style>
+</head>
+<body>
+<div id="root"></div>
+<script>
+window.onerror = function(msg, src, line) {
+  document.getElementById('root').innerHTML = '<div style="padding:30px;color:#E74C3C;font-family:sans-serif;background:#1a0808;min-height:100vh"><h2>Blad:</h2><p>' + msg + '</p><p>Linia: ' + line + '</p></div>';
+};
+</script>
+<script>
+function runApp() {
+const { useState, useEffect } = React;
+const SUPABASE_URL = "https://qnjwncioybhjgsbrqbyi.supabase.co";
+const SUPABASE_KEY = "sb_publishable_37NVsxhh-trAPXLCF5p5UA__X4nh4a6";
+const METRICS = [
+    { id: "rozmowy", label: "Nowe rozmowy", icon: "💬", color: "#3B9EE8", tip: "Ile nowych osob zagadnales/as dzisiaj?" },
+    { id: "zaproszenia", label: "Zaproszenia", icon: "📩", color: "#7B4FE8", tip: "Ile osob zaprosiles/as na spotkanie?" },
+    { id: "spotkania", label: "Spotkania odbyte", icon: "🤝", color: "#27AE60", tip: "Ile spotkan faktycznie sie odbylo?" },
+    { id: "partnerzy", label: "Nowi partnerzy/klienci", icon: "⭐", color: "#FFB700", tip: "Ile nowych osob dolaczyla lub zostala klientem?" },
+    { id: "followup", label: "Follow-upy", icon: "🔄", color: "#E67E22", tip: "Ile follow-upow wykonales/as?" },
+    { id: "sety", label: "Sprzedane Sety", icon: "📦", color: "#E74C3C", tip: "Ile Setow sprzedales/as dzisiaj?" },
+];
+const ADMIN_PIN = "admin2026";
+const TEAMS = [
+    "Katarzyna Golos", "Danuta Chyla", "Mariusz Bartosz", "Grace Gralka",
+    "Magdalena Krawczyk", "Radoslaw Fisz", "Kinga Wiesyk", "Helena Cieciora",
+];
+const today = () => new Date().toISOString().slice(0, 10);
+const weekKey = () => { const d = new Date(), j = new Date(d.getFullYear(), 0, 1); return `${d.getFullYear()}-W${String(Math.ceil(((d - j) / 86400000 + j.getDay() + 1) / 7)).padStart(2, "0")}`; };
+const monthKey = () => { const d = new Date(); return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}`; };
+const monthLbl = () => new Date().toLocaleDateString("pl-PL", { month: "long", year: "numeric" });
+const pct = (a, b) => b > 0 ? Math.round(a / b * 100) : 0;
+// ── SUPABASE ─────────────────────────────────────────────────────────────────
+async function db(path, opts = {}) {
+    const res = await fetch(SUPABASE_URL + "/rest/v1/" + path, {
+        headers: {
+            "apikey": SUPABASE_KEY,
+            "Authorization": "Bearer " + SUPABASE_KEY,
+            "Content-Type": "application/json",
+            "Prefer": opts.prefer || "return=representation",
+        },
+        method: opts.method || "GET",
+        body: opts.body ? JSON.stringify(opts.body) : undefined,
+    });
+    if (!res.ok) {
+        console.error("DB error", await res.text());
+        return null;
+    }
+    const ct = res.headers.get("content-type") || "";
+    return ct.includes("json") ? res.json() : null;
+}
+async function loadMembers() {
+    const rows = await db("members?select=*&order=name") || [];
+    return rows.map((r) => ({ id: r.id, name: r.name, idNum: r.id_num, team: r.team, joined: r.joined, lastSeen: r.last_seen, lastEntry: r.last_entry }));
+}
+async function saveMember(m) {
+    await db("members?on_conflict=id", { method: "POST", prefer: "resolution=merge-duplicates", body: { id: m.id, name: m.name, id_num: m.idNum, team: m.team, joined: m.joined, last_seen: m.lastSeen, last_entry: m.lastEntry } });
+}
+async function loadEntries(memberId) {
+    const rows = await db(`entries?member_id=eq.${memberId}&order=date`) || [];
+    return rows.map((r) => ({ date: r.date, week: r.week, rozmowy: r.rozmowy || 0, zaproszenia: r.zaproszenia || 0, spotkania: r.spotkania || 0, partnerzy: r.partnerzy || 0, followup: r.followup || 0, sety: r.sety || 0 }));
+}
+async function saveEntry(memberId, e) {
+    await db("entries?on_conflict=member_id,date", { method: "POST", prefer: "resolution=merge-duplicates", body: { member_id: memberId, date: e.date, week: e.week, rozmowy: e.rozmowy || 0, zaproszenia: e.zaproszenia || 0, spotkania: e.spotkania || 0, partnerzy: e.partnerzy || 0, followup: e.followup || 0, sety: e.sety || 0 } });
+}
+async function loadAllEntries() {
+    const rows = await db("entries?select=*&order=date") || [];
+    const map = {};
+    for (const r of rows) {
+        if (!map[r.member_id])
+            map[r.member_id] = [];
+        map[r.member_id].push({ date: r.date, week: r.week, rozmowy: r.rozmowy || 0, zaproszenia: r.zaproszenia || 0, spotkania: r.spotkania || 0, partnerzy: r.partnerzy || 0, followup: r.followup || 0, sety: r.sety || 0 });
+    }
+    return map;
+}
+// ── AI ────────────────────────────────────────────────────────────────────────
+async function getAICoaching({ memberName, todayData, history, isAdmin, teamData }) {
+    var _a, _b;
+    const c1 = pct(todayData.zaproszenia, todayData.rozmowy), c2 = pct(todayData.spotkania, todayData.zaproszenia), c3 = pct(todayData.partnerzy, todayData.spotkania);
+    const last7 = history.slice(-7);
+    const avg = (id) => last7.length > 0 ? Math.round(last7.reduce((s, e) => s + (e[id] || 0), 0) / last7.length * 10) / 10 : 0;
+    const prompt = isAdmin
+        ? `Jestes ekspertem menedzmentu sprzedazy w branzy longevity. Analizujesz dane zespolu. Jezyk: polski.\nDANE: Czlonkow: ${teamData.total}, Aktywnych: ${teamData.active}, Rozmowy: ${teamData.rozmowy}, Zaproszenia: ${teamData.zaproszenia}, Spotkania: ${teamData.spotkania}, Partnerzy: ${teamData.partnerzy}, Followup: ${teamData.followup}, Sety: ${teamData.sety}\nCZLONKOWIE: ${teamData.members.map((m) => `${m.name}: ${m.active ? "AKTYWNY" : "BRAK"}, rozmowy:${m.rozmowy || 0}`).join("; ")}\nOdpowiedz TYLKO JSON: {"ocena":"...","priorytet":"...","wskazowki":["...","...","..."],"czerwona_flaga":null,"motywacja":"..."}`
+        : `Jestes osobistym coachem sprzedazy w branzy longevity. Mow per Ty. Jezyk: polski.\nOSOBA: ${memberName}\nDZIS: rozmowy=${todayData.rozmowy}, zaproszenia=${todayData.zaproszenia}, spotkania=${todayData.spotkania}, partnerzy=${todayData.partnerzy}, followup=${todayData.followup}, sety=${todayData.sety}\nKONW: R→Z=${c1}%, Z→S=${c2}%, S→P=${c3}%\nSR.7DNI: rozmowy=${avg("rozmowy")}, spotkania=${avg("spotkania")}\nOdpowiedz TYLKO JSON: {"ocena_dnia":"...","mocna_strona":"...","obszar_do_poprawy":"...","zadanie_na_jutro":"...","wskazowka_techniczna":"...","motywacja":"..."}`;
+    const res = await fetch("https://super-queen-fe04ai-proxy.pastuchamateusz.workers.dev/", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ model: "claude-sonnet-4-20250514", max_tokens: 800, messages: [{ role: "user", content: prompt }] }) });
+    const data = await res.json();
+    const text = ((_b = (_a = data.content) === null || _a === void 0 ? void 0 : _a.find((b) => b.type === "text")) === null || _b === void 0 ? void 0 : _b.text) || "{}";
+    try {
+        return JSON.parse(text.replace(/```json|```/g, "").trim());
+    }
+    catch (_c) {
+        return null;
+    }
+}
+// ── STYLES ────────────────────────────────────────────────────────────────────
+const GS = `@import url('https://fonts.googleapis.com/css2?family=Outfit:wght@400;600;700;800&display=swap');
+*{box-sizing:border-box;margin:0;padding:0}
+input::-webkit-outer-spin-button,input::-webkit-inner-spin-button{-webkit-appearance:none}
+@keyframes spin{to{transform:rotate(360deg)}}
+@keyframes fadeUp{from{opacity:0;transform:translateY(8px)}to{opacity:1;transform:translateY(0)}}`;
+// ── PRIMITIVES ────────────────────────────────────────────────────────────────
+function Spinner({ full = true }) {
+    return React.createElement("div", { style: Object.assign({ display: "flex", alignItems: "center", justifyContent: "center" }, (full ? { height: "100vh", background: "#0d0d1a" } : { padding: 40 })) }, React.createElement("div", { style: { width: 34, height: 34, border: "3px solid #222", borderTop: "3px solid #FFB700", borderRadius: "50%", animation: "spin 0.8s linear infinite" } }), React.createElement("style", null, "@keyframes spin{to{transform:rotate(360deg)}}"));
+}
+function StatCard({ label, value, icon, color, sub }) {
+    return React.createElement("div", { style: { background: "#12122a", border: `1px solid ${color}22`, borderTop: `3px solid ${color}`, borderRadius: 12, padding: "13px 12px" } }, React.createElement("div", { style: { fontSize: 18, marginBottom: 5 } }, icon), React.createElement("div", { style: { fontSize: 22, fontWeight: 800, color, lineHeight: 1 } }, value), React.createElement("div", { style: { fontSize: 10, color: "#888", marginTop: 4 } }, label), sub && React.createElement("div", { style: { fontSize: 9, color: "#444", marginTop: 2 } }, sub));
+}
+function ConvBar({ label, value, color }) {
+    return React.createElement("div", { style: { marginBottom: 10 } }, React.createElement("div", { style: { display: "flex", justifyContent: "space-between", marginBottom: 4 } }, React.createElement("span", { style: { fontSize: 11, color: "#888" } }, label), React.createElement("span", { style: { fontSize: 11, fontWeight: 700, color: value >= 30 ? color : "#E74C3C" } }, value + "%")), React.createElement("div", { style: { background: "#1a1a2e", borderRadius: 4, height: 5, overflow: "hidden" } }, React.createElement("div", { style: { height: "100%", width: `${Math.min(value, 100)}%`, background: value >= 30 ? color : "#E74C3C", borderRadius: 4, transition: "width 0.8s ease" } })));
+}
+function MetricInput({ metric, value, onChange }) {
+    return React.createElement("div", {
+        style: { background: "#12122a", border: `1px solid ${metric.color}33`, borderRadius: 12, padding: "12px 14px", display: "flex", alignItems: "center", gap: 12 },
+        onMouseEnter: (e) => e.currentTarget.style.borderColor = metric.color + "88",
+        onMouseLeave: (e) => e.currentTarget.style.borderColor = metric.color + "33"
+    }, React.createElement("div", { style: { fontSize: 22, minWidth: 32, textAlign: "center" } }, metric.icon), React.createElement("div", { style: { flex: 1 } }, React.createElement("div", { style: { fontSize: 10, color: "#888", letterSpacing: 1 } }, metric.label.toUpperCase()), React.createElement("div", { style: { fontSize: 9, color: "#444", marginTop: 2 } }, metric.tip)), React.createElement("input", {
+        type: "number", min: 0, value,
+        onChange: (e) => onChange(Math.max(0, parseInt(e.target.value) || 0)),
+        style: { width: 68, textAlign: "center", background: "#1a1a2e", border: `2px solid ${metric.color}55`, borderRadius: 8, color: metric.color, fontSize: 20, fontWeight: 800, padding: "6px 4px", outline: "none", fontFamily: "inherit" }
+    }));
+}
+// ── AI PANEL ─────────────────────────────────────────────────────────────────
+function AICoachPanel({ memberName, todayData, history, isAdmin = false, teamData = null }) {
+    const [coaching, setCoaching] = React.useState(null);
+    const [loading, setLoading] = React.useState(false);
+    const [open, setOpen] = React.useState(false);
+    const analyze = async () => { setLoading(true); setOpen(true); const r = await getAICoaching({ memberName, todayData, history, isAdmin, teamData }); setCoaching(r); setLoading(false); };
+    const btn = React.createElement("button", { onClick: analyze, disabled: loading, style: { width: "100%", padding: "14px", background: loading ? "#1a1a2e" : "linear-gradient(135deg,#7B4FE8,#3B9EE8)", border: loading ? "1px solid #333" : "none", borderRadius: 12, color: "#fff", fontSize: 13, fontWeight: 700, cursor: loading ? "not-allowed" : "pointer", fontFamily: "inherit", display: "flex", alignItems: "center", justifyContent: "center", gap: 8 } }, loading ? [React.createElement("div", { key: "sp", style: { width: 14, height: 14, border: "2px solid #444", borderTop: "2px solid #7B4FE8", borderRadius: "50%", animation: "spin 0.8s linear infinite" } }), "Analizuje..."] : `🤖 ${isAdmin ? "Analiza AI zespolu" : "Coach AI — co mam poprawic?"}`);
+    if (!open)
+        return React.createElement("div", { style: { marginTop: 16 } }, btn);
+    if (loading)
+        return React.createElement("div", { style: { marginTop: 16 } }, btn, React.createElement("div", { style: { marginTop: 10, padding: 20, textAlign: "center", color: "#555", fontSize: 12 } }, "Analizuje Twoje liczby..."));
+    if (!coaching)
+        return React.createElement("div", { style: { marginTop: 16 } }, btn, React.createElement("div", { style: { marginTop: 10, padding: 14, background: "#1a0d0d", borderRadius: 12, color: "#E74C3C", fontSize: 12, textAlign: "center" } }, "Blad polaczenia z AI. Sprobuj ponownie."));
+    const block = (bg, border, titleColor, title, text) => React.createElement("div", { style: { background: bg, border: `1px solid ${border}`, borderRadius: 10, padding: "11px 13px", marginBottom: 9 } }, React.createElement("div", { style: { fontSize: 9, color: titleColor, letterSpacing: 1, marginBottom: 4 } }, title), React.createElement("div", { style: { fontSize: 12, color: "#ccc", lineHeight: 1.6 } }, text));
+    const panel = isAdmin
+        ? React.createElement("div", { style: { padding: "14px" } }, block("#12122a", "#FFB70030", "#FFB700", "OCENA ZESPOLU", coaching.ocena), block("#0a1a0a", "#27AE6030", "#27AE60", "🎯 PRIORYTET LIDERA", coaching.priorytet), React.createElement("div", { style: { background: "#0a1220", border: "1px solid #3B9EE830", borderRadius: 10, padding: "11px 13px", marginBottom: 9 } }, React.createElement("div", { style: { fontSize: 9, color: "#3B9EE8", letterSpacing: 1, marginBottom: 8 } }, "💡 WSKAZOWKI"), ...(coaching.wskazowki || []).map((w, i) => React.createElement("div", { key: i, style: { display: "flex", gap: 8, marginBottom: 6 } }, React.createElement("div", { style: { width: 18, height: 18, borderRadius: "50%", background: "#3B9EE822", display: "flex", alignItems: "center", justifyContent: "center", fontSize: 9, color: "#3B9EE8", flexShrink: 0 } }, i + 1), React.createElement("div", { style: { fontSize: 12, color: "#ccc", lineHeight: 1.5 } }, w)))), coaching.czerwona_flaga && block("#1a0808", "#E74C3C44", "#E74C3C", "🚨 CZERWONA FLAGA", coaching.czerwona_flaga), React.createElement("div", { style: { background: "linear-gradient(135deg,#FFB70010,#E67E2210)", border: "1px solid #FFB70020", borderRadius: 10, padding: "12px 14px", textAlign: "center" } }, React.createElement("div", { style: { fontSize: 12, color: "#fde68a", fontStyle: "italic", lineHeight: 1.6 } }, coaching.motywacja)))
+        : React.createElement("div", { style: { padding: "14px" } }, block("#12122a", "#7B4FE830", "#a78bfa", "OCENA DNIA", coaching.ocena_dnia), React.createElement("div", { style: { display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8, marginBottom: 9 } }, React.createElement("div", { style: { background: "#0a1a0e", border: "1px solid #27AE6030", borderRadius: 10, padding: "11px 12px" } }, React.createElement("div", { style: { fontSize: 9, color: "#27AE60", letterSpacing: 1, marginBottom: 5 } }, "✅ CO ROBISZ DOBRZE"), React.createElement("div", { style: { fontSize: 11, color: "#ccc", lineHeight: 1.5 } }, coaching.mocna_strona)), React.createElement("div", { style: { background: "#1a0a0a", border: "1px solid #E74C3C30", borderRadius: 10, padding: "11px 12px" } }, React.createElement("div", { style: { fontSize: 9, color: "#E74C3C", letterSpacing: 1, marginBottom: 5 } }, "⚠️ DO POPRAWY"), React.createElement("div", { style: { fontSize: 11, color: "#ccc", lineHeight: 1.5 } }, coaching.obszar_do_poprawy))), block("#1a1400", "#FFB70030", "#FFB700", "🎯 ZADANIE NA JUTRO", coaching.zadanie_na_jutro), block("#0a1220", "#3B9EE830", "#3B9EE8", "💡 WSKAZOWKA TECHNICZNA", coaching.wskazowka_techniczna), React.createElement("div", { style: { background: "linear-gradient(135deg,#7B4FE810,#3B9EE810)", border: "1px solid #7B4FE820", borderRadius: 10, padding: "12px 14px", textAlign: "center" } }, React.createElement("div", { style: { fontSize: 12, color: "#c4b5fd", fontStyle: "italic", lineHeight: 1.6 } }, coaching.motywacja)));
+    return React.createElement("div", { style: { marginTop: 16 } }, btn, React.createElement("div", { style: { marginTop: 10, background: "#0d0d22", border: "1px solid #7B4FE833", borderRadius: 14, overflow: "hidden" } }, React.createElement("div", { style: { background: "linear-gradient(135deg,#7B4FE818,#3B9EE818)", borderBottom: "1px solid #7B4FE820", padding: "11px 14px", display: "flex", alignItems: "center", gap: 8 } }, React.createElement("span", { style: { fontSize: 18 } }, "🤖"), React.createElement("div", null, React.createElement("div", { style: { fontSize: 12, fontWeight: 700, color: "#a78bfa" } }, isAdmin ? "Analiza AI — Panel Lidera" : `Coach AI · ${memberName}`), React.createElement("div", { style: { fontSize: 10, color: "#444" } }, "Analiza na podstawie liczb"))), panel));
+}
+// ── RANKING ROWS ──────────────────────────────────────────────────────────────
+function RankingRow({ r, i, period }) {
+    const medal = i === 0 ? "🥇" : i === 1 ? "🥈" : i === 2 ? "🥉" : "";
+    const sc = r.score >= (period === "monthly" ? 200 : 50) ? "#27AE60" : r.score >= (period === "monthly" ? 80 : 20) ? "#FFB700" : "#888";
+    return React.createElement("div", { style: { background: "#12122a", border: "1px solid #1a1a2e", borderRadius: 10, padding: "10px 13px", marginBottom: 6 } }, React.createElement("div", { style: { display: "flex", alignItems: "center", gap: 10, marginBottom: 6 } }, React.createElement("div", { style: { fontSize: 18, minWidth: 24, textAlign: "center" } }, medal || React.createElement("span", { style: { fontSize: 12, color: "#444" } }, "#" + (i + 1))), React.createElement("div", { style: { flex: 1 } }, React.createElement("div", { style: { fontWeight: 700, fontSize: 13 } }, r.name), React.createElement("div", { style: { fontSize: 10, color: "#555" } }, (r.team || "—") + " · ID:" + r.idNum + " · " + r.activeDays + "d aktywnych")), React.createElement("div", { style: { textAlign: "right" } }, React.createElement("div", { style: { fontSize: 15, fontWeight: 800, color: sc } }, r.score), React.createElement("div", { style: { fontSize: 9, color: "#555" } }, "pkt"))), React.createElement("div", { style: { display: "grid", gridTemplateColumns: "repeat(6,1fr)", gap: 4 } }, ...METRICS.map(m => React.createElement("div", { key: m.id, style: { textAlign: "center" } }, React.createElement("div", { style: { fontSize: 13, fontWeight: 700, color: m.color } }, r[m.id] || 0), React.createElement("div", { style: { fontSize: 8, color: "#444" } }, m.icon)))));
+}
+function TeamRankRow({ t, i, color, barMax }) {
+    const medal = i === 0 ? "🥇" : i === 1 ? "🥈" : i === 2 ? "🥉" : "";
+    return React.createElement("div", { style: { background: "#12122a", border: "1px solid #222", borderRadius: 11, padding: "12px 14px", marginBottom: 8 } }, React.createElement("div", { style: { display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 8 } }, React.createElement("div", null, React.createElement("span", { style: { fontSize: 16, marginRight: 6 } }, medal || ("#" + (i + 1))), React.createElement("span", { style: { fontWeight: 700, fontSize: 13 } }, t.name), React.createElement("span", { style: { marginLeft: 8, fontSize: 10, color: "#555" } }, t.members + " osob")), React.createElement("div", { style: { textAlign: "right" } }, React.createElement("div", { style: { fontSize: 16, fontWeight: 800, color } }, t.score + " pkt"))), React.createElement("div", { style: { background: "#0d0d1a", borderRadius: 4, height: 5, marginBottom: 8, overflow: "hidden" } }, React.createElement("div", { style: { height: "100%", width: `${Math.round(t.score / Math.max(barMax || 1, 1) * 100)}%`, background: `linear-gradient(90deg,${color},${color}88)`, borderRadius: 4 } })), React.createElement("div", { style: { display: "grid", gridTemplateColumns: "repeat(6,1fr)", gap: 4 } }, ...METRICS.map(m => React.createElement("div", { key: m.id, style: { textAlign: "center" } }, React.createElement("div", { style: { fontSize: 13, fontWeight: 700, color: m.color } }, t[m.id] || 0), React.createElement("div", { style: { fontSize: 8, color: "#444" } }, m.icon)))));
+}
+// ── MEMBER VIEW ───────────────────────────────────────────────────────────────
+function MemberView({ memberId, memberName, memberTeam, memberIdNum, onBack }) {
+    const [tab, setTab] = React.useState("daily");
+    const [todayData, setTodayData] = React.useState(() => Object.fromEntries(METRICS.map(m => [m.id, 0])));
+    const [history, setHistory] = React.useState([]);
+    const [saved, setSaved] = React.useState(false);
+    const [loading, setLoading] = React.useState(true);
+    React.useEffect(() => {
+        (async () => {
+            const hist = await loadEntries(memberId);
+            setHistory(hist);
+            const td = hist.find((e) => e.date === today());
+            if (td)
+                setTodayData(td);
+            setLoading(false);
+        })();
+    }, [memberId]);
+    const handleSave = async () => {
+        const entry = Object.assign(Object.assign({}, todayData), { date: today(), week: weekKey() });
+        const newHist = [...history.filter((e) => e.date !== today()), entry];
+        setHistory(newHist);
+        await saveEntry(memberId, entry);
+        await saveMember({ id: memberId, name: memberName, idNum: memberIdNum, team: memberTeam, joined: today(), lastSeen: today(), lastEntry: entry });
+        setSaved(true);
+        setTimeout(() => setSaved(false), 2500);
+    };
+    const weekEntries = history.filter((e) => e.week === weekKey());
+    const weekTotals = METRICS.reduce((acc, m) => { acc[m.id] = weekEntries.reduce((s, e) => s + (e[m.id] || 0), 0); return acc; }, {});
+    if (loading)
+        return React.createElement(Spinner, null);
+    const navTabs = [["daily", "📅 Dzisiaj"], ["week", "📊 Tydzien"], ["history", "📈 Historia"]];
+    return React.createElement("div", { style: { minHeight: "100vh", background: "#0d0d1a", color: "#fff", fontFamily: "'Outfit',sans-serif" } }, React.createElement("style", null, GS), 
+    // Header
+    React.createElement("div", { style: { background: "#12122a", borderBottom: "1px solid #222", padding: "13px 18px", display: "flex", alignItems: "center", gap: 12 } }, React.createElement("button", { onClick: onBack, style: { background: "none", border: "1px solid #333", borderRadius: 8, color: "#888", padding: "6px 12px", cursor: "pointer", fontSize: 12, fontFamily: "inherit" } }, "← Wyjdz"), React.createElement("div", { style: { flex: 1 } }, React.createElement("div", { style: { fontWeight: 700, fontSize: 15 } }, "👋 Hej, " + memberName + "!"), React.createElement("div", { style: { fontSize: 10, color: "#555", marginTop: 2 } }, memberTeam && React.createElement("span", { style: { color: "#FFB700", marginRight: 8 } }, "👥 " + memberTeam), memberIdNum && React.createElement("span", null, "ID: " + memberIdNum)))), 
+    // Tabs
+    React.createElement("div", { style: { display: "flex", background: "#12122a", borderBottom: "1px solid #222" } }, ...navTabs.map(([k, l]) => React.createElement("button", { key: k, onClick: () => setTab(k), style: { flex: 1, padding: "11px 8px", background: "none", border: "none", borderBottom: tab === k ? "2px solid #FFB700" : "2px solid transparent", color: tab === k ? "#FFB700" : "#666", cursor: "pointer", fontSize: 12, fontWeight: tab === k ? 700 : 400, fontFamily: "inherit" } }, l))), React.createElement("div", { style: { padding: "16px 14px", maxWidth: 480, margin: "0 auto" } }, tab === "daily" && React.createElement(React.Fragment, null, ...METRICS.map(m => React.createElement("div", { key: m.id, style: { marginBottom: 8 } }, React.createElement(MetricInput, { metric: m, value: todayData[m.id] || 0, onChange: (v) => setTodayData((p) => (Object.assign(Object.assign({}, p), { [m.id]: v }))) }))), React.createElement("button", { onClick: handleSave, style: { width: "100%", marginTop: 6, padding: "14px", background: saved ? "#27AE60" : "linear-gradient(135deg,#FFB700,#FF8C00)", border: "none", borderRadius: 12, color: "#000", fontSize: 14, fontWeight: 800, cursor: "pointer", fontFamily: "inherit", transition: "all 0.3s" } }, saved ? "✅ Zapisano!" : "💾 Zapisz dzisiejsze liczby"), todayData.rozmowy > 0 && React.createElement(React.Fragment, null, React.createElement("div", { style: { fontSize: 10, color: "#555", margin: "16px 0 7px", letterSpacing: 1 } }, "KONWERSJA DZISIAJ"), React.createElement("div", { style: { background: "#12122a", border: "1px solid #222", borderRadius: 12, padding: 13 } }, React.createElement(ConvBar, { label: "Rozmowa → Zaproszenie", value: pct(todayData.zaproszenia, todayData.rozmowy), color: "#3B9EE8" }), React.createElement(ConvBar, { label: "Zaproszenie → Spotkanie", value: pct(todayData.spotkania, todayData.zaproszenia), color: "#7B4FE8" }), React.createElement(ConvBar, { label: "Spotkanie → Partner/Klient", value: pct(todayData.partnerzy, todayData.spotkania), color: "#27AE60" }))), React.createElement("div", { style: { fontSize: 10, color: "#555", margin: "16px 0 0", letterSpacing: 1 } }, "AI COACHING"), React.createElement(AICoachPanel, { memberName, todayData, history })), tab === "week" && React.createElement(React.Fragment, null, React.createElement("div", { style: { fontSize: 11, color: "#555", marginBottom: 12, textAlign: "center" } }, "Biezacy tydzien — " + weekEntries.length + " aktywnych dni"), React.createElement("div", { style: { display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8, marginBottom: 14 } }, ...METRICS.map(m => React.createElement(StatCard, { key: m.id, label: m.label, icon: m.icon, color: m.color, value: weekTotals[m.id] || 0 }))), weekTotals.rozmowy > 0 && React.createElement("div", { style: { background: "#12122a", border: "1px solid #222", borderRadius: 12, padding: 13, marginBottom: 14 } }, React.createElement(ConvBar, { label: "Rozmowa → Zaproszenie", value: pct(weekTotals.zaproszenia, weekTotals.rozmowy), color: "#3B9EE8" }), React.createElement(ConvBar, { label: "Zaproszenie → Spotkanie", value: pct(weekTotals.spotkania, weekTotals.zaproszenia), color: "#7B4FE8" }), React.createElement(ConvBar, { label: "Spotkanie → Partner/Klient", value: pct(weekTotals.partnerzy, weekTotals.spotkania), color: "#27AE60" })), ...weekEntries.sort((a, b) => a.date.localeCompare(b.date)).map((e) => React.createElement("div", { key: e.date, style: { background: "#12122a", border: "1px solid #222", borderRadius: 10, padding: "10px 13px", marginBottom: 7, display: "flex", justifyContent: "space-between", alignItems: "center" } }, React.createElement("div", { style: { fontSize: 12, color: "#888" } }, new Date(e.date + "T12:00:00").toLocaleDateString("pl-PL", { weekday: "short", day: "numeric", month: "short" })), React.createElement("div", { style: { display: "flex", gap: 8 } }, ...METRICS.map(m => React.createElement("div", { key: m.id, style: { textAlign: "center" } }, React.createElement("div", { style: { fontSize: 13, fontWeight: 700, color: m.color } }, e[m.id] || 0), React.createElement("div", { style: { fontSize: 8, color: "#555" } }, m.icon))))))), tab === "history" && React.createElement(React.Fragment, null, React.createElement("div", { style: { fontSize: 11, color: "#555", marginBottom: 12, textAlign: "center" } }, "Historia — " + history.length + " dni"), history.length === 0
+        ? React.createElement("div", { style: { textAlign: "center", color: "#555", padding: 40 } }, "Brak historii jeszcze")
+        : [...history].sort((a, b) => b.date.localeCompare(a.date)).map((e) => React.createElement("div", { key: e.date, style: { background: "#12122a", border: "1px solid #222", borderRadius: 12, padding: "13px", marginBottom: 9 } }, React.createElement("div", { style: { fontSize: 11, color: "#FFB700", fontWeight: 700, marginBottom: 9 } }, new Date(e.date + "T12:00:00").toLocaleDateString("pl-PL", { weekday: "long", day: "numeric", month: "long" })), React.createElement("div", { style: { display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 7 } }, ...METRICS.map(m => React.createElement("div", { key: m.id, style: { textAlign: "center" } }, React.createElement("div", { style: { fontSize: 17, fontWeight: 800, color: m.color } }, e[m.id] || 0), React.createElement("div", { style: { fontSize: 9, color: "#555" } }, m.label)))))))));
+}
+// ── ADMIN VIEW ────────────────────────────────────────────────────────────────
+function AdminView({ onBack }) {
+    const [members, setMembers] = React.useState([]);
+    const [selected, setSelected] = React.useState(null);
+    const [memberHistory, setMemberHistory] = React.useState([]);
+    const [allHistories, setAllHistories] = React.useState({});
+    const [tab, setTab] = React.useState("overview");
+    const [selectedTeam, setSelectedTeam] = React.useState(null);
+    const [loading, setLoading] = React.useState(true);
+    const [histLoading, setHistLoading] = React.useState(false);
+    const [histLoaded, setHistLoaded] = React.useState(false);
+    React.useEffect(() => { (async () => { const m = await loadMembers(); setMembers(m); setLoading(false); })(); }, []);
+    const loadAllHist = async () => {
+        if (histLoaded)
+            return;
+        setHistLoading(true);
+        const h = await loadAllEntries();
+        setAllHistories(h);
+        setHistLoaded(true);
+        setHistLoading(false);
+    };
+    const handleTab = (t) => { setTab(t); if (t === "weekly" || t === "monthly")
+        loadAllHist(); };
+    const selectMember = async (m) => { setSelected(m); setMemberHistory(await loadEntries(m.id)); setTab("member"); };
+    const openTeam = (t) => { setSelectedTeam(t); setTab("teamdetail"); };
+    const activeToday = members.filter(m => m.lastSeen === today());
+    const teamToday = METRICS.reduce((acc, m) => { acc[m.id] = activeToday.reduce((s, mem) => { var _a; return s + (((_a = mem.lastEntry) === null || _a === void 0 ? void 0 : _a[m.id]) || 0); }, 0); return acc; }, {});
+    const teamData = Object.assign(Object.assign({ total: members.length, active: activeToday.length }, teamToday), { members: members.map(m => { var _a; return ({ name: m.name, active: m.lastSeen === today(), rozmowy: ((_a = m.lastEntry) === null || _a === void 0 ? void 0 : _a.rozmowy) || 0 }); }) });
+    const computeStats = (mList) => {
+        const a = mList.filter(m => m.lastSeen === today());
+        const t = METRICS.reduce((acc, m) => { acc[m.id] = a.reduce((s, mem) => { var _a; return s + (((_a = mem.lastEntry) === null || _a === void 0 ? void 0 : _a[m.id]) || 0); }, 0); return acc; }, {});
+        return Object.assign({ active: a.length, total: mList.length }, t);
+    };
+    const computePeriodStats = (mList, filterFn) => mList.map(m => {
+        const hist = allHistories[m.id] || [];
+        const entries = hist.filter(filterFn);
+        const totals = METRICS.reduce((acc, mt) => { acc[mt.id] = entries.reduce((s, e) => s + (e[mt.id] || 0), 0); return acc; }, {});
+        const activeDays = entries.length;
+        const score = (totals.rozmowy || 0) + (totals.zaproszenia || 0) * 2 + (totals.spotkania || 0) * 3 + (totals.partnerzy || 0) * 10 + (totals.sety || 0) * 5;
+        const weekBreakdown = [...new Set(entries.map((e) => e.week))].sort().map((wk) => { const we = entries.filter((e) => e.week === wk); return { wk, rozmowy: we.reduce((s, e) => s + (e.rozmowy || 0), 0), spotkania: we.reduce((s, e) => s + (e.spotkania || 0), 0) }; });
+        return Object.assign(Object.assign(Object.assign({}, m), totals), { activeDays, score, weekBreakdown });
+    }).sort((a, b) => b.score - a.score);
+    if (loading)
+        return React.createElement(Spinner, null);
+    const backLabel = tab === "member" ? "← Profil" : tab === "teamdetail" ? "← Podzesp." : "← Wyjdz";
+    const backAction = tab === "member" ? () => setTab("overview") : tab === "teamdetail" ? () => setTab("teams") : onBack;
+    const periodSection = (label, color, period, filterFn) => {
+        if (histLoading)
+            return React.createElement(Spinner, { full: false });
+        if (!histLoaded)
+            return React.createElement("div", { style: { textAlign: "center", color: "#555", padding: 40 } }, "Ladowanie...");
+        const rows = computePeriodStats(members, filterFn);
+        const totals = METRICS.reduce((acc, m) => { acc[m.id] = rows.reduce((s, r) => s + (r[m.id] || 0), 0); return acc; }, {});
+        const active = rows.filter((r) => r.activeDays > 0).length;
+        const teamRows = TEAMS.map(tn => { const tm = rows.filter((r) => r.team === tn); const t = METRICS.reduce((acc, m) => { acc[m.id] = tm.reduce((s, r) => s + (r[m.id] || 0), 0); return acc; }, {}); return Object.assign({ name: tn, members: tm.length, score: tm.reduce((s, r) => s + r.score, 0) }, t); }).filter((t) => t.members > 0).sort((a, b) => b.score - a.score);
+        const isMonth = period === "monthly";
+        const header = isMonth
+            ? React.createElement("div", { style: { background: "linear-gradient(135deg,#1a1422,#1a1a3a)", border: "1px solid #7B4FE833", borderRadius: 12, padding: "14px 16px", marginBottom: 14, textAlign: "center" } }, React.createElement("div", { style: { fontSize: 11, color: "#a78bfa", letterSpacing: 2, marginBottom: 4 } }, "RAPORT MIESIĘCZNY"), React.createElement("div", { style: { fontSize: 22, fontWeight: 800, color: "#fff", textTransform: "capitalize" } }, monthLbl()), React.createElement("div", { style: { fontSize: 11, color: "#555", marginTop: 4 } }, active + " z " + members.length + " osob aktywnych"))
+            : React.createElement("div", { style: { background: "linear-gradient(135deg,#16162e,#1a1a3a)", border: "1px solid #FFB70033", borderRadius: 12, padding: "14px 16px", marginBottom: 14, textAlign: "center" } }, React.createElement("div", { style: { fontSize: 11, color: "#FFB700", letterSpacing: 2, marginBottom: 4 } }, "RAPORT TYGODNIOWY"), React.createElement("div", { style: { fontSize: 22, fontWeight: 800, color: "#fff" } }, "Tydzien " + weekKey().split("-W")[1] + " · " + new Date().getFullYear()), React.createElement("div", { style: { fontSize: 11, color: "#555", marginTop: 4 } }, active + " z " + members.length + " osob aktywnych"));
+        return React.createElement(React.Fragment, null, header, React.createElement("div", { style: { fontSize: 10, color: "#555", marginBottom: 8, letterSpacing: 1 } }, "SUMA " + label), React.createElement("div", { style: { display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 8, marginBottom: 14 } }, ...METRICS.map(m => React.createElement(StatCard, { key: m.id, label: m.label, icon: m.icon, color: m.color, value: totals[m.id] || 0, sub: isMonth ? "ten miesiac" : "ten tydzien" }))), totals.rozmowy > 0 && React.createElement("div", { style: { background: "#12122a", border: "1px solid #222", borderRadius: 12, padding: 13, marginBottom: 14 } }, React.createElement(ConvBar, { label: "Rozmowa → Zaproszenie", value: pct(totals.zaproszenia, totals.rozmowy), color: "#3B9EE8" }), React.createElement(ConvBar, { label: "Zaproszenie → Spotkanie", value: pct(totals.spotkania, totals.zaproszenia), color: "#7B4FE8" }), React.createElement(ConvBar, { label: "Spotkanie → Partner/Klient", value: pct(totals.partnerzy, totals.spotkania), color: "#27AE60" })), React.createElement("div", { style: { fontSize: 10, color: "#555", marginBottom: 0, letterSpacing: 1 } }, "AI ANALIZA"), React.createElement(AICoachPanel, { memberName: "Lider", todayData: totals, history: [], isAdmin: true, teamData: Object.assign(Object.assign({ total: members.length, active }, totals), { members: rows.map((r) => ({ name: r.name, active: r.activeDays > 0, rozmowy: r.rozmowy || 0 })) }) }), React.createElement("div", { style: { fontSize: 10, color: "#555", margin: "20px 0 9px", letterSpacing: 1 } }, "RANKING PODZESP."), ...teamRows.map((t, i) => { var _a; return React.createElement(TeamRankRow, { key: t.name, t, i, color, barMax: ((_a = teamRows[0]) === null || _a === void 0 ? void 0 : _a.score) || 1 }); }), React.createElement("div", { style: { fontSize: 10, color: "#555", margin: "18px 0 9px", letterSpacing: 1 } }, "RANKING OSOB"), ...rows.filter((r) => r.activeDays > 0).map((r, i) => React.createElement(RankingRow, { key: r.id, r, i, period })), rows.filter((r) => r.activeDays === 0).length > 0 && React.createElement(React.Fragment, null, React.createElement("div", { style: { fontSize: 10, color: "#E74C3C", margin: "14px 0 8px", letterSpacing: 1 } }, "⚠️ BRAK AKTYWNOSCI (" + rows.filter((r) => r.activeDays === 0).length + " osob)"), ...rows.filter((r) => r.activeDays === 0).map((r) => React.createElement("div", { key: r.id, style: { background: "#1a0d0d", border: "1px solid #E74C3C22", borderRadius: 9, padding: "9px 13px", marginBottom: 5, display: "flex", justifyContent: "space-between" } }, React.createElement("span", { style: { fontWeight: 600, fontSize: 13, color: "#888" } }, r.name + " " + (r.team || "")), React.createElement("span", { style: { fontSize: 10, color: "#E74C3C" } }, "0 dni")))));
+    };
+    return React.createElement("div", { style: { minHeight: "100vh", background: "#0d0d1a", color: "#fff", fontFamily: "'Outfit',sans-serif" } }, React.createElement("style", null, GS), 
+    // Header
+    React.createElement("div", { style: { background: "linear-gradient(135deg,#12122a,#1a1a3e)", borderBottom: "1px solid #FFB70033", padding: "15px 18px", display: "flex", alignItems: "center", gap: 12 } }, React.createElement("button", { onClick: backAction, style: { background: "none", border: "1px solid #333", borderRadius: 8, color: "#888", padding: "6px 12px", cursor: "pointer", fontSize: 12, fontFamily: "inherit" } }, backLabel), React.createElement("div", { style: { flex: 1 } }, React.createElement("div", { style: { fontWeight: 800, fontSize: 17, color: "#FFB700" } }, "🎯 Panel Lidera"), React.createElement("div", { style: { fontSize: 11, color: "#555" } }, tab === "member" && selected ? selected.name : tab === "teamdetail" && selectedTeam ? "Zespol: " + selectedTeam : members.length + " czlonkow · " + activeToday.length + " aktywnych dzis"))), 
+    // Nav
+    ["overview", "teams", "weekly", "monthly"].includes(tab) && React.createElement("div", { style: { display: "flex", background: "#12122a", borderBottom: "1px solid #222" } }, ...[["overview", "🌐 Dziś"], ["teams", "👥 Podzesp."], ["weekly", "📅 Tydzień"], ["monthly", "📆 Miesiąc"]].map(([k, l]) => React.createElement("button", { key: k, onClick: () => handleTab(k), style: { flex: 1, padding: "11px 4px", background: "none", border: "none", borderBottom: tab === k ? "2px solid #FFB700" : "2px solid transparent", color: tab === k ? "#FFB700" : "#666", cursor: "pointer", fontSize: 10, fontWeight: tab === k ? 700 : 400, fontFamily: "inherit", whiteSpace: "nowrap" } }, l))), 
+    // Overview
+    tab === "overview" && React.createElement("div", { style: { padding: "16px 14px", maxWidth: 600, margin: "0 auto" } }, React.createElement("div", { style: { fontSize: 10, color: "#555", marginBottom: 9, letterSpacing: 1 } }, "ZESPOL DZISIAJ"), React.createElement("div", { style: { display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 8, marginBottom: 14 } }, ...METRICS.map(m => React.createElement(StatCard, { key: m.id, label: m.label, icon: m.icon, color: m.color, value: teamToday[m.id] || 0, sub: activeToday.length + " raportow" }))), teamToday.rozmowy > 0 && React.createElement("div", { style: { background: "#12122a", border: "1px solid #222", borderRadius: 12, padding: 13, marginBottom: 14 } }, React.createElement(ConvBar, { label: "Rozmowa → Zaproszenie", value: pct(teamToday.zaproszenia, teamToday.rozmowy), color: "#3B9EE8" }), React.createElement(ConvBar, { label: "Zaproszenie → Spotkanie", value: pct(teamToday.spotkania, teamToday.zaproszenia), color: "#7B4FE8" }), React.createElement(ConvBar, { label: "Spotkanie → Partner/Klient", value: pct(teamToday.partnerzy, teamToday.spotkania), color: "#27AE60" })), React.createElement("div", { style: { fontSize: 10, color: "#555", marginBottom: 0, letterSpacing: 1 } }, "AI ANALIZA"), React.createElement(AICoachPanel, { memberName: "Lider", todayData: teamToday, history: [], isAdmin: true, teamData }), React.createElement("div", { style: { fontSize: 10, color: "#555", margin: "20px 0 9px", letterSpacing: 1 } }, "CZLONKOWIE wg ZESPOLOW (" + members.length + ")"), members.length === 0 && React.createElement("div", { style: { textAlign: "center", color: "#555", padding: 36, background: "#12122a", borderRadius: 12 } }, "Nikt sie jeszcze nie zalogowal."), ...TEAMS.map(tn => {
+        const tm = members.filter(m => m.team === tn);
+        if (!tm.length)
+            return null;
+        const ta = tm.filter(m => m.lastSeen === today()).length;
+        return React.createElement("div", { key: tn, style: { marginBottom: 14 } }, React.createElement("div", { style: { display: "flex", justifyContent: "space-between", alignItems: "center", background: "#16162e", border: "1px solid #2a2a4a", borderRadius: 10, padding: "9px 14px", marginBottom: 6 } }, React.createElement("span", { style: { fontWeight: 700, fontSize: 13, color: "#FFB700" } }, "👥 " + tn), React.createElement("span", { style: { fontSize: 10, color: "#555" } }, tm.length + " osob · " + ta + " aktywnych")), ...tm.map(m => {
+            const e = m.lastEntry || {}, act = m.lastSeen === today();
+            return React.createElement("div", { key: m.id, onClick: () => selectMember(m),
+                style: { background: "#12122a", border: `1px solid ${act ? "#27AE6033" : "#1a1a2e"}`, borderLeft: `3px solid ${act ? "#27AE60" : "#2a2a3a"}`, borderRadius: 10, padding: "10px 13px", marginBottom: 5, cursor: "pointer", marginLeft: 12 },
+                onMouseEnter: (ev) => ev.currentTarget.style.borderColor = "#FFB70055",
+                onMouseLeave: (ev) => ev.currentTarget.style.borderColor = act ? "#27AE6033" : "#1a1a2e"
+            }, React.createElement("div", { style: { display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 6 } }, React.createElement("div", null, React.createElement("span", { style: { fontWeight: 700, fontSize: 13 } }, m.name), React.createElement("span", { style: { marginLeft: 6, fontSize: 10, color: "#555" } }, "ID:" + m.idNum), React.createElement("span", { style: { marginLeft: 6, fontSize: 10, padding: "1px 6px", borderRadius: 20, background: act ? "#27AE6018" : "#33333318", color: act ? "#27AE60" : "#555" } }, act ? "✅ dzis" : m.lastSeen || "brak")), React.createElement("span", { style: { color: "#444" } }, "›")), React.createElement("div", { style: { display: "flex", gap: 8 } }, ...METRICS.map(mt => React.createElement("div", { key: mt.id, style: { textAlign: "center" } }, React.createElement("div", { style: { fontSize: 13, fontWeight: 700, color: act ? mt.color : "#333" } }, act ? (e[mt.id] || 0) : "—"), React.createElement("div", { style: { fontSize: 9, color: "#444" } }, mt.icon)))));
+        }));
+    })), 
+    // Teams
+    tab === "teams" && React.createElement("div", { style: { padding: "16px 14px", maxWidth: 600, margin: "0 auto" } }, React.createElement("div", { style: { fontSize: 10, color: "#555", marginBottom: 12, letterSpacing: 1 } }, "PODZESPY — KLIKNIJ ABY ZOBACZYC ANALIZE AI"), ...TEAMS.map(tn => {
+        const tm = members.filter(m => m.team === tn);
+        if (!tm.length)
+            return React.createElement("div", { key: tn, style: { background: "#0d0d1a", border: "1px solid #1a1a2e", borderRadius: 12, padding: "12px 14px", marginBottom: 8, opacity: 0.4 } }, React.createElement("div", { style: { fontSize: 13, color: "#555" } }, "👥 " + tn), React.createElement("div", { style: { fontSize: 10, color: "#444", marginTop: 2 } }, "Brak czlonkow jeszcze"));
+        const stats = computeStats(tm);
+        const ap = pct(stats.active, stats.total);
+        const pc = ap >= 70 ? "#27AE60" : ap >= 40 ? "#FFB700" : "#E74C3C";
+        return React.createElement("div", { key: tn, onClick: () => openTeam(tn),
+            style: { background: "#12122a", border: "1px solid #222", borderTop: `3px solid ${pc}`, borderRadius: 12, padding: "14px", marginBottom: 10, cursor: "pointer" },
+            onMouseEnter: (e) => { e.currentTarget.style.transform = "translateY(-2px)"; },
+            onMouseLeave: (e) => { e.currentTarget.style.transform = "translateY(0)"; }
+        }, React.createElement("div", { style: { display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 10 } }, React.createElement("div", null, React.createElement("div", { style: { fontWeight: 800, fontSize: 15 } }, "👥 " + tn), React.createElement("div", { style: { fontSize: 10, color: "#555", marginTop: 2 } }, stats.total + " osob · ", React.createElement("span", { style: { color: pc } }, stats.active + " aktywnych (" + ap + "%)"))), React.createElement("div", { style: { fontSize: 11, color: "#FFB700", fontWeight: 700 } }, "Analiza AI →")), React.createElement("div", { style: { display: "grid", gridTemplateColumns: "repeat(6,1fr)", gap: 6, marginBottom: 8 } }, ...METRICS.map(m => React.createElement("div", { key: m.id, style: { textAlign: "center", background: "#0d0d1a", borderRadius: 8, padding: "7px 4px" } }, React.createElement("div", { style: { fontSize: 15, fontWeight: 800, color: stats.active > 0 ? m.color : "#333" } }, stats.active > 0 ? stats[m.id] || 0 : "—"), React.createElement("div", { style: { fontSize: 8, color: "#444", marginTop: 2 } }, m.icon)))));
+    })), 
+    // Weekly
+    tab === "weekly" && React.createElement("div", { style: { padding: "16px 14px", maxWidth: 640, margin: "0 auto" } }, periodSection("TYGODNIA", "#FFB700", "weekly", (e) => e.week === weekKey())), 
+    // Monthly
+    tab === "monthly" && React.createElement("div", { style: { padding: "16px 14px", maxWidth: 640, margin: "0 auto" } }, periodSection("MIESIACA", "#a78bfa", "monthly", (e) => e.date && e.date.slice(0, 7) === monthKey())), 
+    // Team detail
+    tab === "teamdetail" && selectedTeam && (() => {
+        const tm = members.filter((m) => m.team === selectedTeam);
+        const stats = computeStats(tm);
+        const ap = pct(stats.active, stats.total);
+        return React.createElement("div", { style: { padding: "16px 14px", maxWidth: 560, margin: "0 auto" } }, React.createElement("div", { style: { background: "linear-gradient(135deg,#16162e,#1a1a3a)", border: "1px solid #2a2a4a", borderRadius: 12, padding: "14px 16px", marginBottom: 14 } }, React.createElement("div", { style: { fontSize: 16, fontWeight: 800, color: "#FFB700", marginBottom: 8 } }, "👥 " + selectedTeam), React.createElement("div", { style: { display: "flex", justifyContent: "space-around" } }, ...[{ v: stats.total, l: "CZLONKOW", c: "#fff" }, { v: stats.active, l: "AKTYWNYCH DZIS", c: "#27AE60" }, { v: stats.total - stats.active, l: "BRAK RAPORTU", c: "#E74C3C" }, { v: ap + "%", l: "AKTYWNOSC", c: "#3B9EE8" }].map(({ v, l, c }) => React.createElement("div", { key: l, style: { textAlign: "center" } }, React.createElement("div", { style: { fontSize: 22, fontWeight: 800, color: c } }, v), React.createElement("div", { style: { fontSize: 9, color: "#555", marginTop: 2 } }, l))))), React.createElement("div", { style: { fontSize: 10, color: "#555", marginBottom: 8, letterSpacing: 1 } }, "LICZBY DZISIAJ"), React.createElement("div", { style: { display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 8, marginBottom: 14 } }, ...METRICS.map(m => React.createElement(StatCard, { key: m.id, label: m.label, icon: m.icon, color: m.color, value: stats[m.id] || 0, sub: stats.active + " raportow" }))), React.createElement("div", { style: { fontSize: 10, color: "#555", marginBottom: 0, letterSpacing: 1 } }, "AI ANALIZA ZESPOLU"), React.createElement(AICoachPanel, { memberName: selectedTeam, todayData: METRICS.reduce((acc, m) => { acc[m.id] = stats[m.id] || 0; return acc; }, {}), history: [], isAdmin: true,
+            teamData: Object.assign(Object.assign({ total: stats.total, active: stats.active }, METRICS.reduce((acc, m) => { acc[m.id] = stats[m.id] || 0; return acc; }, {})), { members: tm.map((m) => { var _a; return ({ name: m.name, active: m.lastSeen === today(), rozmowy: ((_a = m.lastEntry) === null || _a === void 0 ? void 0 : _a.rozmowy) || 0 }); }) }) }), React.createElement("div", { style: { fontSize: 10, color: "#555", margin: "18px 0 9px", letterSpacing: 1 } }, "CZLONKOWIE (" + tm.length + ")"), ...tm.map((m) => {
+            const e = m.lastEntry || {}, act = m.lastSeen === today();
+            return React.createElement("div", { key: m.id, onClick: () => selectMember(m),
+                style: { background: "#12122a", border: `1px solid ${act ? "#27AE6033" : "#1a1a2e"}`, borderLeft: `3px solid ${act ? "#27AE60" : "#2a2a3a"}`, borderRadius: 10, padding: "10px 13px", marginBottom: 6, cursor: "pointer" },
+                onMouseEnter: (ev) => ev.currentTarget.style.borderColor = "#FFB70055",
+                onMouseLeave: (ev) => ev.currentTarget.style.borderColor = act ? "#27AE6033" : "#1a1a2e"
+            }, React.createElement("div", { style: { display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 6 } }, React.createElement("div", null, React.createElement("span", { style: { fontWeight: 700, fontSize: 13 } }, m.name), React.createElement("span", { style: { marginLeft: 6, fontSize: 10, color: "#555" } }, "ID:" + m.idNum), React.createElement("span", { style: { marginLeft: 6, fontSize: 10, padding: "1px 6px", borderRadius: 20, background: act ? "#27AE6018" : "#33333318", color: act ? "#27AE60" : "#555" } }, act ? "✅ dzis" : m.lastSeen || "brak")), React.createElement("span", { style: { color: "#444" } }, "›")), React.createElement("div", { style: { display: "flex", gap: 8 } }, ...METRICS.map(mt => React.createElement("div", { key: mt.id, style: { textAlign: "center" } }, React.createElement("div", { style: { fontSize: 13, fontWeight: 700, color: act ? mt.color : "#333" } }, act ? (e[mt.id] || 0) : "—"), React.createElement("div", { style: { fontSize: 9, color: "#444" } }, mt.icon)))));
+        }));
+    })(), 
+    // Member detail
+    tab === "member" && selected && React.createElement("div", { style: { padding: "16px 14px", maxWidth: 540, margin: "0 auto" } }, React.createElement("div", { style: { background: "#16162e", border: "1px solid #2a2a4a", borderRadius: 10, padding: "10px 14px", marginBottom: 14, display: "flex", gap: 16, alignItems: "center" } }, ...[{ v: selected.team || "—", l: "ZESPOL", c: "#FFB700" }, { v: selected.idNum || "—", l: "NUMER ID", c: "#3B9EE8" }, { v: memberHistory.length, l: "DNI AKTYWNYCH", c: "#27AE60" }].map(({ v, l, c }, i, arr) => React.createElement(React.Fragment, { key: l }, React.createElement("div", { style: { textAlign: "center" } }, React.createElement("div", { style: { fontSize: 9, color: "#555", marginBottom: 2 } }, l), React.createElement("div", { style: { fontSize: 12, fontWeight: 700, color: c } }, v)), i < arr.length - 1 && React.createElement("div", { style: { width: 1, height: 30, background: "#2a2a4a" } })))), React.createElement("div", { style: { display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 8, marginBottom: 14 } }, ...METRICS.map(m => { const total = memberHistory.reduce((s, e) => s + (e[m.id] || 0), 0); return React.createElement(StatCard, { key: m.id, label: m.label, icon: m.icon, color: m.color, value: total, sub: "lacznie" }); })), memberHistory.length > 0 && React.createElement(React.Fragment, null, React.createElement("div", { style: { fontSize: 10, color: "#555", marginBottom: 0, letterSpacing: 1 } }, "AI COACHING"), React.createElement(AICoachPanel, { memberName: selected.name, todayData: memberHistory[memberHistory.length - 1], history: memberHistory })), React.createElement("div", { style: { fontSize: 10, color: "#555", margin: "18px 0 9px", letterSpacing: 1 } }, "HISTORIA (" + memberHistory.length + " dni)"), memberHistory.length === 0
+        ? React.createElement("div", { style: { color: "#555", textAlign: "center", padding: 28 } }, "Brak historii")
+        : [...memberHistory].sort((a, b) => b.date.localeCompare(a.date)).slice(0, 14).map((e) => {
+            const score = (e.rozmowy || 0) + (e.zaproszenia || 0) * 2 + (e.spotkania || 0) * 3 + (e.partnerzy || 0) * 10 + (e.sety || 0) * 5;
+            const sc = score >= 20 ? "#27AE60" : score >= 10 ? "#FFB700" : "#E74C3C";
+            return React.createElement("div", { key: e.date, style: { background: "#12122a", border: "1px solid #222", borderRadius: 10, padding: "11px 13px", marginBottom: 7 } }, React.createElement("div", { style: { display: "flex", justifyContent: "space-between", marginBottom: 7 } }, React.createElement("div", { style: { fontSize: 12, color: "#888" } }, new Date(e.date + "T12:00:00").toLocaleDateString("pl-PL", { weekday: "short", day: "numeric", month: "short" })), React.createElement("div", { style: { fontSize: 11, color: sc, fontWeight: 700 } }, "Wynik: " + score)), React.createElement("div", { style: { display: "grid", gridTemplateColumns: "repeat(6,1fr)", gap: 4 } }, ...METRICS.map(m => React.createElement("div", { key: m.id, style: { textAlign: "center" } }, React.createElement("div", { style: { fontSize: 13, fontWeight: 700, color: m.color } }, e[m.id] || 0), React.createElement("div", { style: { fontSize: 9, color: "#555" } }, m.icon)))));
+        })));
+}
+// ── LOGIN ─────────────────────────────────────────────────────────────────────
+function LoginScreen({ onMember, onAdmin }) {
+    const [mode, setMode] = React.useState(null);
+    const [name, setName] = React.useState("");
+    const [idNum, setIdNum] = React.useState("");
+    const [team, setTeam] = React.useState("");
+    const [pin, setPin] = React.useState("");
+    const [members, setMembers] = React.useState([]);
+    const [error, setError] = React.useState("");
+    const [newUser, setNewUser] = React.useState(false);
+    const [loginLoading, setLoginLoading] = React.useState(false);
+    React.useEffect(() => { loadMembers().then(m => setMembers(m || [])); }, []);
+    const inp = { width: "100%", padding: "13px", background: "#12122a", border: "1px solid #333", borderRadius: 10, color: "#fff", fontSize: 14, marginBottom: 9, outline: "none", fontFamily: "inherit" };
+    const sel = Object.assign(Object.assign({}, inp), { appearance: "none", WebkitAppearance: "none", cursor: "pointer" });
+    const login = async () => {
+        if (!name.trim()) {
+            setError("Wpisz imie i nazwisko");
+            return;
+        }
+        if (!idNum.trim()) {
+            setError("Wpisz numer ID");
+            return;
+        }
+        if (!team) {
+            setError("Wybierz swoj zespol");
+            return;
+        }
+        setLoginLoading(true);
+        const ex = members.find((m) => m.idNum === idNum.trim());
+        const member = ex ? Object.assign(Object.assign({}, ex), { name: name.trim(), team }) : { id: Date.now().toString(), name: name.trim(), idNum: idNum.trim(), team, joined: today() };
+        await saveMember(member);
+        setLoginLoading(false);
+        onMember(member);
+    };
+    const grouped = TEAMS.reduce((acc, t) => { acc[t] = members.filter((m) => m.team === t); return acc; }, {});
+    return React.createElement("div", { style: { minHeight: "100vh", background: "#0d0d1a", display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", padding: 20, fontFamily: "'Outfit',sans-serif" } }, React.createElement("style", null, GS), React.createElement("div", { style: { textAlign: "center", marginBottom: 30 } }, React.createElement("div", { style: { fontSize: 42, marginBottom: 8 } }, "📊"), React.createElement("div", { style: { fontSize: 25, fontWeight: 800, color: "#fff", letterSpacing: -0.5 } }, "Team Tracker"), React.createElement("div", { style: { fontSize: 11, color: "#555", marginTop: 4 } }, "System monitoringu · Riway")), !mode && React.createElement("div", { style: { width: "100%", maxWidth: 310 } }, React.createElement("button", { onClick: () => setMode("member"), style: { width: "100%", padding: "16px 20px", marginBottom: 10, background: "linear-gradient(135deg,#3B9EE8,#7B4FE8)", border: "none", borderRadius: 14, color: "#fff", fontSize: 14, fontWeight: 700, cursor: "pointer", fontFamily: "inherit" } }, "👤 Czlonek zespolu"), React.createElement("button", { onClick: () => setMode("admin"), style: { width: "100%", padding: "16px 20px", background: "transparent", border: "1px solid #FFB70055", borderRadius: 14, color: "#FFB700", fontSize: 14, fontWeight: 700, cursor: "pointer", fontFamily: "inherit" } }, "🎯 Lider (admin)")), mode === "member" && React.createElement("div", { style: { width: "100%", maxWidth: 360 } }, members.length > 0 && !newUser && React.createElement(React.Fragment, null, React.createElement("div", { style: { fontSize: 10, color: "#555", marginBottom: 8, letterSpacing: 1 } }, "POWRACAJACY — WYBIERZ SIEBIE"), React.createElement("div", { style: { maxHeight: 280, overflowY: "auto", marginBottom: 6 } }, ...TEAMS.filter(t => { var _a; return ((_a = grouped[t]) === null || _a === void 0 ? void 0 : _a.length) > 0; }).map(t => React.createElement("div", { key: t }, React.createElement("div", { style: { fontSize: 9, color: "#444", letterSpacing: 1, padding: "6px 4px 4px", borderBottom: "1px solid #1a1a2e" } }, "ZESPOL: " + t.toUpperCase()), ...grouped[t].map((m) => React.createElement("button", { key: m.id, onClick: () => onMember(m), style: { width: "100%", padding: "10px 13px", marginBottom: 4, background: "#12122a", border: "1px solid #222", borderRadius: 9, color: "#fff", fontSize: 13, cursor: "pointer", textAlign: "left", display: "flex", alignItems: "center", gap: 9, fontFamily: "inherit" } }, React.createElement("span", { style: { fontSize: 16 } }, "👤"), React.createElement("div", { style: { flex: 1 } }, React.createElement("div", { style: { fontWeight: 600 } }, m.name), React.createElement("div", { style: { fontSize: 10, color: "#555" } }, "ID: " + m.idNum)), m.lastSeen === today() && React.createElement("span", { style: { fontSize: 10, color: "#27AE60" } }, "✅")))))), React.createElement("button", { onClick: () => setNewUser(true), style: { background: "none", border: "1px solid #333", borderRadius: 9, color: "#888", fontSize: 12, cursor: "pointer", width: "100%", padding: "9px", marginBottom: 6, fontFamily: "inherit" } }, "+ Nowa osoba / inne konto")), (!members.length || newUser) && React.createElement(React.Fragment, null, React.createElement("div", { style: { fontSize: 10, color: "#555", marginBottom: 10, letterSpacing: 1 } }, newUser ? "NOWA REJESTRACJA" : "PIERWSZE LOGOWANIE"), React.createElement("div", { style: { fontSize: 10, color: "#888", marginBottom: 4 } }, "Imie i Nazwisko"), React.createElement("input", { value: name, onChange: (e) => { setName(e.target.value); setError(""); }, placeholder: "np. Anna Kowalska", style: inp }), React.createElement("div", { style: { fontSize: 10, color: "#888", marginBottom: 4 } }, "Numer ID"), React.createElement("input", { value: idNum, onChange: (e) => { setIdNum(e.target.value); setError(""); }, placeholder: "Twoj numer ID", style: inp }), React.createElement("div", { style: { fontSize: 10, color: "#888", marginBottom: 4 } }, "Twoj zespol (lider)"), React.createElement("select", { value: team, onChange: (e) => { setTeam(e.target.value); setError(""); }, style: sel }, React.createElement("option", { value: "" }, "— Wybierz swoj zespol —"), ...TEAMS.map(t => React.createElement("option", { key: t, value: t }, t))), error && React.createElement("div", { style: { color: "#E74C3C", fontSize: 12, marginBottom: 8 } }, error), React.createElement("button", { onClick: login, disabled: loginLoading, style: { width: "100%", padding: "14px", background: loginLoading ? "#333" : "linear-gradient(135deg,#3B9EE8,#7B4FE8)", border: "none", borderRadius: 10, color: "#fff", fontSize: 14, fontWeight: 700, cursor: loginLoading ? "not-allowed" : "pointer", fontFamily: "inherit", marginBottom: 6 } }, loginLoading ? "Laczenie..." : "Wejdz →")), React.createElement("button", { onClick: () => { setMode(null); setError(""); setNewUser(false); setName(""); setIdNum(""); setTeam(""); }, style: { background: "none", border: "none", color: "#444", fontSize: 12, cursor: "pointer", width: "100%", padding: "8px", fontFamily: "inherit" } }, "← Wróc")), mode === "admin" && React.createElement("div", { style: { width: "100%", maxWidth: 310 } }, React.createElement("div", { style: { fontSize: 12, color: "#888", marginBottom: 12, textAlign: "center" } }, "PIN lidera"), React.createElement("input", { type: "password", value: pin, onChange: (e) => { setPin(e.target.value); setError(""); }, placeholder: "••••••••",
+        onKeyDown: (e) => e.key === "Enter" && (pin === ADMIN_PIN ? onAdmin() : (setError("Bledny PIN"), setPin(""))),
+        style: Object.assign(Object.assign({}, inp), { color: "#FFB700", fontSize: 20, textAlign: "center", letterSpacing: 4 }) }), error && React.createElement("div", { style: { color: "#E74C3C", fontSize: 12, marginBottom: 7, textAlign: "center" } }, error), React.createElement("button", { onClick: () => { if (pin === ADMIN_PIN)
+            onAdmin();
+        else {
+            setError("Bledny PIN");
+            setPin("");
+        } }, style: { width: "100%", padding: "13px", background: "linear-gradient(135deg,#FFB700,#FF8C00)", border: "none", borderRadius: 10, color: "#000", fontSize: 14, fontWeight: 700, cursor: "pointer", fontFamily: "inherit" } }, "Wejdz →"), React.createElement("div", { style: { fontSize: 10, color: "#333", textAlign: "center", marginTop: 5 } }, "PIN: admin2026"), React.createElement("button", { onClick: () => { setMode(null); setError(""); }, style: { background: "none", border: "none", color: "#444", fontSize: 12, cursor: "pointer", width: "100%", padding: "9px", marginTop: 4, fontFamily: "inherit" } }, "← Wróc")));
+}
+// ── APP ───────────────────────────────────────────────────────────────────────
+function App() {
+    const [view, setView] = React.useState("login");
+    const [member, setMember] = React.useState(null);
+    if (view === "login")
+        return React.createElement(LoginScreen, { onMember: (m) => { setMember(m); setView("member"); }, onAdmin: () => setView("admin") });
+    if (view === "member")
+        return React.createElement(MemberView, { memberId: member.id, memberName: member.name, memberTeam: member.team, memberIdNum: member.idNum, onBack: () => setView("login") });
+    if (view === "admin")
+        return React.createElement(AdminView, { onBack: () => setView("login") });
+    return React.createElement(LoginScreen, { onMember: (m) => { setMember(m); setView("member"); }, onAdmin: () => setView("admin") });
+}
+
+const root = ReactDOM.createRoot(document.getElementById('root'));
+root.render(React.createElement(App));
+}
+</script>
+</body>
+</html>
