@@ -77,8 +77,8 @@ LACZNIE ${history.length} dni: rozmowy=${history.reduce((s,e)=>s+(e.rozmowy||0),
 
 Odpowiedz TYLKO JSON bez backtickow: {"ocena_dnia":"...","mocna_strona":"...","obszar_do_poprawy":"...","zadanie_na_jutro":"...","wskazowka_techniczna":"...","motywacja":"..."}`;
 
-  const res=await fetch("https://super-queen-fe04ai-proxy.pastuchamateusz.workers.dev/",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({model:"claude-sonnet-4-20250514",max_tokens:1000,messages:[{role:"user",content:prompt}]})});
-  const data=await res.json();
+  const res=await fetch("https://super-queen-fe04ai-proxy.pastuchamateusz.workers.dev/",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({model:"claude-sonnet-4-6",max_tokens:1000,messages:[{role:"user",content:prompt}]})});
+  const data=await res.json();console.log("AI response:",JSON.stringify(data).substring(0,600));
   const text=data.content?.find(b=>b.type==="text")?.text||"{}";
   try{return JSON.parse(text.replace(/```json|```/g,"").trim());}catch{return null;}
 }
